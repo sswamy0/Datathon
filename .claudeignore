@@ -1,0 +1,7 @@
+data/
+outputs/
+*.parquet
+*.csv
+*.zip
+node_modules/
+.venv/
