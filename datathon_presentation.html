@@ -45,6 +45,10 @@
             --slide-padding: clamp(1.5rem, 4vw, 4rem);
             --content-gap: clamp(0.75rem, 2vw, 2rem);
             --element-gap: clamp(0.25rem, 1vw, 1rem);
+            --media-frame-radius: clamp(4px, 0.8vw, 10px);
+            --media-frame-max-width: min(94vw, 1200px);
+            --media-frame-height: clamp(16rem, 54vh, 40rem);
+            --media-frame-height-dynamic: clamp(16rem, 54dvh, 40rem);
 
             --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
             --duration-normal: 0.6s;
@@ -121,11 +125,15 @@
             line-height: 1.4;
         }
 
-        img,
-        .image-container {
+        img {
             max-width: 100%;
-            max-height: min(50vh, 400px);
+            height: auto;
             object-fit: contain;
+        }
+
+        .image-container {
+            width: 100%;
+            max-width: 100%;
         }
 
         /* Short viewports */
@@ -337,27 +345,40 @@
             display: flex;
             gap: clamp(0.5rem, 1.5vw, 1.5rem);
             margin-top: var(--content-gap);
-            align-items: center;
+            align-items: stretch;
             justify-content: center;
             flex-wrap: nowrap;
         }
 
-        .image-row img {
-            max-height: min(42vh, 360px);
-            border-radius: clamp(4px, 0.8vw, 8px);
-            border: 1px solid var(--border-subtle);
+        .image-row > * {
+            flex: 1 1 0;
+            min-width: 0;
         }
 
         .single-image {
             display: flex;
             justify-content: center;
-            margin-top: var(--content-gap);
+            align-items: center;
+            width: 100%;
+            max-width: var(--media-frame-max-width);
+            margin: var(--content-gap) auto 0;
         }
 
-        .single-image img {
-            max-height: min(55vh, 440px);
-            border-radius: clamp(4px, 0.8vw, 8px);
-            border: 1px solid var(--border-subtle);
+        .visual-frame {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            min-width: 0;
+            height: var(--media-frame-height);
+            height: var(--media-frame-height-dynamic);
+        }
+
+        .visual-frame img {
+            width: 100%;
+            height: 100%;
+            max-height: 100%;
+            border-radius: var(--media-frame-radius);
         }
 
         /* ===========================================
@@ -402,8 +423,12 @@
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: clamp(1rem, 3vw, 3rem);
-            align-items: center;
+            align-items: stretch;
             margin-top: var(--content-gap);
+        }
+
+        .two-col>* {
+            min-width: 0;
         }
 
         @media (max-width: 768px) {
@@ -855,7 +880,7 @@
             <p class="subtitle reveal">GEBCO 2025 ocean depth across the U.S. study area &mdash; deeper waters require
                 floating foundations</p>
 
-            <div class="single-image reveal">
+            <div class="single-image visual-frame reveal">
                 <img src="outputs/plots/depth_heatmap.png"
                     alt="Ocean bathymetry heatmap showing depth variations across U.S. coastal waters">
             </div>
@@ -874,10 +899,9 @@
                 requires floating platforms.</p>
 
             <div class="two-col reveal">
-                <div>
+                <div class="visual-frame">
                     <img src="outputs/plots/foundation_histogram.png"
-                        alt="Bar chart of ocean area by foundation type depth bin"
-                        style="max-height: min(45vh, 380px); border-radius: 8px; border: 1px solid var(--border-subtle);">
+                        alt="Bar chart of ocean area by foundation type depth bin">
                 </div>
                 <div>
                     <ul class="content-list">
@@ -906,7 +930,7 @@
             <p class="subtitle reveal">Annual mean WPD from ERA5 2025 &mdash; highest densities in the North Atlantic
                 and Alaskan waters</p>
 
-            <div class="single-image reveal">
+            <div class="single-image visual-frame reveal">
                 <img src="outputs/plots/wpd_heatmap.png" alt="Wind power density heatmap across study area">
             </div>
         </div>
@@ -923,7 +947,7 @@
             <p class="subtitle reveal">Sites passing all physical filters: sufficient wind, safe waves, suitable depth,
                 stable seabed</p>
 
-            <div class="single-image reveal">
+            <div class="single-image visual-frame reveal">
                 <img src="outputs/plots/golden_zones.png" alt="Golden zone offshore wind sites around the U.S.">
             </div>
         </div>
@@ -969,10 +993,9 @@
             <p class="subtitle reveal">Marker size &amp; opacity reflect optimal portfolio weight. Bold borders indicate
                 selected sub-clusters.</p>
 
-            <div class="single-image reveal">
+            <div class="single-image visual-frame reveal">
                 <img src="outputs/plots/cluster_maps_optimal.png"
-                    alt="Six-panel map showing optimal subcluster allocations for all U.S. coastal regions"
-                    style="max-height: min(58vh, 460px);">
+                    alt="Six-panel map showing optimal subcluster allocations for all U.S. coastal regions">
             </div>
         </div>
     </section>
@@ -1002,15 +1025,13 @@
             </div>
 
             <div class="two-col reveal">
-                <div>
+                <div class="visual-frame">
                     <img src="outputs/plots/pacific_corr_matrix.png"
-                        alt="Pacific sub-cluster correlation matrix showing anti-correlation"
-                        style="max-height: min(38vh, 320px); border-radius: 8px; border: 1px solid var(--border-subtle);">
+                        alt="Pacific sub-cluster correlation matrix showing anti-correlation">
                 </div>
-                <div>
+                <div class="visual-frame">
                     <img src="outputs/plots/pacific_seasonal.png"
-                        alt="Pacific monthly WPD profiles showing opposing seasonal patterns"
-                        style="max-height: min(38vh, 320px); border-radius: 8px; border: 1px solid var(--border-subtle);">
+                        alt="Pacific monthly WPD profiles showing opposing seasonal patterns">
                 </div>
             </div>
         </div>
@@ -1028,15 +1049,13 @@
                 33.9%</p>
 
             <div class="two-col reveal">
-                <div>
+                <div class="visual-frame">
                     <img src="outputs/plots/pacific_portfolio_map.png"
-                        alt="Map showing optimal portfolio allocation along Pacific coast"
-                        style="max-height: min(52vh, 420px); border-radius: 8px; border: 1px solid var(--border-subtle);">
+                        alt="Map showing optimal portfolio allocation along Pacific coast">
                 </div>
-                <div>
+                <div class="visual-frame">
                     <img src="outputs/plots/pacific_frontier.png"
-                        alt="Pacific efficient frontier showing min-variance portfolio"
-                        style="max-height: min(52vh, 420px); border-radius: 8px; border: 1px solid var(--border-subtle);">
+                        alt="Pacific efficient frontier showing min-variance portfolio">
                 </div>
             </div>
         </div>
@@ -1051,10 +1070,9 @@
         <div class="slide-content">
             <h2 class="reveal">All Regions: Diversification Benefit</h2>
 
-            <div class="single-image reveal">
+            <div class="single-image visual-frame reveal">
                 <img src="outputs/plots/cluster_summary.png"
-                    alt="Bar chart comparing variance reduction and minimum correlation across all 6 regions"
-                    style="max-height: min(40vh, 340px);">
+                    alt="Bar chart comparing variance reduction and minimum correlation across all 6 regions">
             </div>
 
             <table class="data-table reveal">

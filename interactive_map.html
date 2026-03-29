@@ -296,6 +296,10 @@
 
     const SC_COLORS = ["#e41a1c", "#377eb8", "#4daf4a"];
     const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const CELL_MARKER_RADIUS = 3.5;
+    const CELL_MARKER_OPACITY = 0.78;
+    const CELL_MARKER_STROKE = "rgba(255, 255, 255, 0.55)";
+    const CELL_MARKER_STROKE_WIDTH = 0.6;
 
     const REGION_MIN_CORR = {
         "Pacific": -0.30, "Alaska": 0.33, "Gulf of Mexico": 0.83,
@@ -391,19 +395,13 @@
             .attr("class", "cell")
             .attr("cx", d => projection([d.lon, d.lat])[0])
             .attr("cy", d => projection([d.lon, d.lat])[1])
-            .attr("r", d => {
-                if (currentRegion) return Math.max(d.w * 0.08 + 2, 2.5);
-                return 2.5;
-            })
+            .attr("r", CELL_MARKER_RADIUS)
             .attr("fill", d => SC_COLORS[d.sc])
-            .attr("opacity", d => {
-                if (currentRegion) return Math.max(d.w / 100 * 0.7 + 0.3, 0.3);
-                return 0.6;
-            })
-            .attr("stroke", d => currentRegion && d.w > 5 ? "#fff" : "none")
-            .attr("stroke-width", 0.5)
+            .attr("opacity", CELL_MARKER_OPACITY)
+            .attr("stroke", CELL_MARKER_STROKE)
+            .attr("stroke-width", CELL_MARKER_STROKE_WIDTH)
             .on("mouseover", function(event, d) {
-                d3.select(this).attr("stroke", "#fff").attr("stroke-width", 2).raise();
+                d3.select(this).raise();
                 const avgWpd = d3.mean(d.wpd);
                 tooltip.classed("visible", true)
                     .html(`
@@ -417,9 +415,6 @@
                     .style("top", (event.offsetY - 10) + "px");
             })
             .on("mouseout", function(event, d) {
-                d3.select(this)
-                    .attr("stroke", currentRegion && d.w > 5 ? "#fff" : "none")
-                    .attr("stroke-width", 0.5);
                 tooltip.classed("visible", false);
             });
     }
