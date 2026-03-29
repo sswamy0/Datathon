@@ -1,33 +1,50 @@
 """
-02_wind_era5.py — ERA5 Wind Physics, Feasibility Filter & Suitability Join
-===========================================================================
-Source  : gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3
-Outputs :
+02_wind_era5.py — ERA5 Wind Physics, Suitability Model & Cluster Analysis
+==========================================================================
+
+Usage:
+  python 02_wind_era5.py month <N>       Process month N (1-12) → monthly parquet
+  python 02_wind_era5.py aggregate       Combine monthly parquets → suitability
+
+Source  : data/Wind/data.grib  (local ERA5 GRIB, ~12 GB)
+Method  : eccodes message-by-message streaming (peak RAM ~1 GB, not 12 GB)
+
+Outputs (month mode):
+  data/era5_month_01.parquet … data/era5_month_12.parquet
+
+Outputs (aggregate mode):
   data/era5_annual_means_2025.parquet   — gridded annual-mean physics fields
   data/suitability_results_2025.parquet — spatial join with bathymetry (Golden Zones)
+  data/prime_wind_sites.parquet         — top 10% suitability + DBSCAN clusters
   outputs/plots/wpd_heatmap.png
   outputs/plots/golden_zones.png
-
-Run: python 02_wind_era5.py
 """
 
 import sys
 import traceback
 import warnings
+import gc
+
 warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 import numpy as np
 import pandas as pd
 import xarray as xr
-import dask
-import dask.array as da
-import gcsfs
 import duckdb
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
 from pathlib import Path
+from scipy.ndimage import distance_transform_edt
+from sklearn.cluster import DBSCAN
+from sklearn.preprocessing import MinMaxScaler
+
+try:
+    import eccodes
+except ImportError:
+    print("ERROR: eccodes not installed. Run: pip install eccodes")
+    sys.exit(1)
 
 try:
     import cmocean
@@ -35,203 +52,432 @@ try:
 except ImportError:
     HAS_CMOCEAN = False
 
-# ── Config ────────────────────────────────────────────────────────────────────
-ZARR_URI   = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
+# -- Config --------------------------------------------------------------------
+GRIB_PATH  = Path("data/Wind/data.grib")
 BATHY_PQ   = Path("data/bathymetry_processed.parquet")
 ERA5_PQ    = Path("data/era5_annual_means_2025.parquet")
 RESULT_PQ  = Path("data/suitability_results_2025.parquet")
+PRIME_PQ   = Path("data/prime_wind_sites.parquet")
 OUT_DIR    = Path("outputs/plots")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Spatial bounds (ARCO ERA5: lat 90→-90 descending, lon 0→359.75)
-LAT_SLICE  = slice(72, 18)     # US waters only (Alaska 72°N to Hawaii 18°N)
-LON_SLICE  = slice(195, 305)   # -165°→-55° in 0–360 convention
+YEAR = 2025
 
-# Time — 4 seasonal representatives (saves ~3x memory vs 12 months)
-YEAR       = 2024
-MONTHS     = [1, 4, 7, 10]    # winter, spring, summer, fall
-
-# Golden Zone thresholds
-WPD_MIN_W_M2   = 400.0   # W/m² — minimum viable wind power density
-DEPTH_MIN_M    = 15.0    # m    — minimum ocean depth (Jacket/Fixed low end)
-DEPTH_MAX_M    = 60.0    # m    — maximum depth for fixed-bottom (Jacket)
-SWH_MAX_M      = 2.5     # m    — max significant wave height
+# Golden Zone thresholds (industry-standard for offshore wind)
+WPD_MIN_W_M2 = 200.0     # IEC Class III minimum (~6 m/s mean)
+DEPTH_MIN_M  = 10.0      # Monopile minimum practical depth
+DEPTH_MAX_M  = 1000.0    # Include deep-water floating (semi-sub, TLP)
+SWH_P90_MAX  = 5.0       # 90th-percentile operability limit (not extreme max)
+SWH_MAX_HARD = 14.0      # Absolute structural survival limit
 
 # Physical constants
-R_DRY_AIR = 287.058      # J/(kg·K) — specific gas constant, dry air
+R_DRY_AIR = 287.058  # J/(kg*K)
 
-# ARCO ERA5 uses full variable names, not CDS short codes
-VAR_U100 = "100m_u_component_of_wind"
-VAR_V100 = "100m_v_component_of_wind"
-VAR_T2M  = "2m_temperature"
-VAR_SP   = "surface_pressure"
-VAR_SWH  = "significant_height_of_combined_wind_waves_and_swell"
+# Suitability weights
+W_WPD   = 0.5
+W_DEPTH = 0.3
+W_WAVE  = 0.2
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 1 — Open ERA5 Zarr (lazy, no data downloaded yet)
-# ─────────────────────────────────────────────────────────────────────────────
+# DBSCAN parameters
+DBSCAN_EPS     = 0.75
+DBSCAN_MIN_PTS = 2
 
-def open_era5_lazy() -> xr.Dataset:
+SFC_VARS  = {"100u", "100v", "2t", "sp"}
+WAVE_VARS = {"swh", "mwp"}
+
+# GRIB fill-value sentinel threshold — anything above this is not real data
+WAVE_SENTINEL = 100.0
+
+
+def _month_parquet_path(month: int) -> Path:
+    return Path(f"data/era5_month_{month:02d}.parquet")
+
+
+# ------------------------------------------------------------------------------
+# SECTION 1 — Stream GRIB message-by-message via eccodes
+# ------------------------------------------------------------------------------
+
+def _grid_coords_from_msg(msgid: int) -> tuple[int, int, np.ndarray, np.ndarray]:
+    """Extract (Nj, Ni, lats, lons) from a GRIB message handle."""
+    Ni = eccodes.codes_get(msgid, "Ni")
+    Nj = eccodes.codes_get(msgid, "Nj")
+    lat0 = eccodes.codes_get(msgid, "latitudeOfFirstGridPointInDegrees")
+    lat1 = eccodes.codes_get(msgid, "latitudeOfLastGridPointInDegrees")
+    lon0 = eccodes.codes_get(msgid, "longitudeOfFirstGridPointInDegrees")
+    lon1 = eccodes.codes_get(msgid, "longitudeOfLastGridPointInDegrees")
+    lats = np.linspace(lat0, lat1, Nj)
+    lons = np.linspace(lon0, lon1, Ni)
+    return Nj, Ni, lats, lons
+
+
+def _process_month_from_grib(
+    grib_path: Path,
+    year: int,
+    month: int,
+) -> tuple[xr.Dataset, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Open ARCO ERA5 Zarr store with anonymous GCS access.
-    Returns a lazy xarray Dataset with dask-backed arrays.
-    Coordinate names in this store: 'latitude', 'longitude', 'time'.
+    Single pass through the GRIB file, reading one message at a time.
+    Only decodes data for messages matching the target year/month.
+
+    Surface vars (100u, 100v, 2t, sp) are buffered per-timestep and
+    physics (WPD, wind speed, air density) computed immediately when
+    all 4 arrive, then the buffer is freed.
+
+    Wave vars (swh, mwp) are collected for percentile / max / mean.
+
+    Returns:
+        (physics_ds, lsm_grid, lsm_lats, lsm_lons)
     """
-    print("[1] Opening ERA5 Zarr store (anonymous GCS) ...")
-    fs = gcsfs.GCSFileSystem(token="anon")
-    store = fs.get_mapper(ZARR_URI)
-    ds = xr.open_zarr(store, consolidated=True, chunks={})   # chunks={} → dask
+    print(f"[1] Streaming GRIB messages for {year}-{month:02d} ...")
+    print(f"    File: {grib_path} ({grib_path.stat().st_size / 1e9:.1f} GB)")
 
-    # Verify required variables exist (full ARCO names)
-    required = {VAR_U100, VAR_V100, VAR_T2M, VAR_SP, VAR_SWH}
-    missing = required - set(ds.data_vars)
-    if missing:
-        raise KeyError(f"ERA5 store missing variables: {missing}. "
-                       f"Available: {sorted(ds.data_vars)}")
+    # -- Surface accumulators (initialised on first matching message) --
+    sfc_lats = sfc_lons = None
+    wpd_sum: np.ndarray | None = None
+    ws_sum: np.ndarray | None = None
+    rho_sum: np.ndarray | None = None
+    n_valid: np.ndarray | None = None
 
-    # Standardise coord names → lat / lon for consistency with bathymetry
-    rename = {}
-    if "latitude"  in ds.coords and "lat" not in ds.coords:
-        rename["latitude"]  = "lat"
-    if "longitude" in ds.coords and "lon" not in ds.coords:
-        rename["longitude"] = "lon"
-    if rename:
-        ds = ds.rename(rename)
+    # Timestep buffer: {(dataDate, dataTime): {shortName: 2d-array}}
+    sfc_buffer: dict[tuple[int, int], dict[str, np.ndarray]] = {}
 
-    print(f"    Store opened. Variables: {sorted(ds.data_vars)}")
-    print(f"    Full time range: {str(ds.time.values[0])[:10]} → "
-          f"{str(ds.time.values[-1])[:10]}")
-    return ds
+    # -- Wave collectors --
+    wave_lats = wave_lons = None
+    swh_all: list[np.ndarray] = []
+    mwp_all: list[np.ndarray] = []
 
+    # -- Land-sea mask (grab first occurrence) --
+    lsm_grid: np.ndarray | None = None
+    lsm_lats = lsm_lons = None
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 2 — Monthly batch physics: WPD, Air Density, SWH stats
-# ─────────────────────────────────────────────────────────────────────────────
+    n_total = 0
+    n_decoded = 0
 
-def _physics_for_month(ds: xr.Dataset, year: int, month: int) -> dict:
-    """
-    For one calendar month:
-    1. Slice spatially + temporally (lazy → only metadata touched).
-    2. Compute wind fields first, then wave height separately to limit peak RAM.
-    Returns xr.Dataset of 2-D monthly aggregate arrays.
-    """
-    import calendar
-    import gc
-    _, ndays = calendar.monthrange(year, month)
-    t_start  = f"{year}-{month:02d}-01"
-    t_end    = f"{year}-{month:02d}-{ndays:02d}T23:00"
+    with open(grib_path, "rb") as f:
+        while True:
+            msgid = eccodes.codes_grib_new_from_file(f)
+            if msgid is None:
+                break
+            n_total += 1
 
-    print(f"    Computing month {year}-{month:02d} ...", flush=True)
+            try:
+                sn = eccodes.codes_get(msgid, "shortName")
 
-    # --- Step A: Wind speed, air density, WPD ---
-    sub_wind = ds[[VAR_U100, VAR_V100, VAR_T2M, VAR_SP]].sel(
-        time=slice(t_start, t_end),
-        lat=LAT_SLICE,
-        lon=LON_SLICE,
+                # --- Land-sea mask (time-invariant, grab once) ---
+                if sn == "lsm" and lsm_grid is None:
+                    Nj, Ni, lsm_lats, lsm_lons = _grid_coords_from_msg(msgid)
+                    lsm_grid = eccodes.codes_get_values(msgid).reshape(Nj, Ni)
+                    continue
+
+                # Skip vars we don't need
+                if sn not in SFC_VARS and sn not in WAVE_VARS:
+                    continue
+
+                # Filter by date
+                dd = eccodes.codes_get(msgid, "dataDate")   # YYYYMMDD
+                msg_year  = dd // 10000
+                msg_month = (dd % 10000) // 100
+                if msg_year != year or msg_month != month:
+                    continue
+
+                dt = eccodes.codes_get(msgid, "dataTime")    # HHMM
+                Nj, Ni, msg_lats, msg_lons = _grid_coords_from_msg(msgid)
+                grid = eccodes.codes_get_values(msgid).reshape(Nj, Ni)
+                n_decoded += 1
+
+                # --- Surface variables ---
+                if sn in SFC_VARS:
+                    if sfc_lats is None:
+                        sfc_lats, sfc_lons = msg_lats, msg_lons
+                        wpd_sum  = np.zeros((Nj, Ni), dtype=np.float64)
+                        ws_sum   = np.zeros((Nj, Ni), dtype=np.float64)
+                        rho_sum  = np.zeros((Nj, Ni), dtype=np.float64)
+                        n_valid  = np.zeros((Nj, Ni), dtype=np.int32)
+
+                    key = (dd, dt)
+                    sfc_buffer.setdefault(key, {})[sn] = grid
+
+                    # All 4 surface vars arrived for this timestep → compute physics
+                    if len(sfc_buffer[key]) == 4:
+                        u  = sfc_buffer[key]["100u"]
+                        v  = sfc_buffer[key]["100v"]
+                        t  = sfc_buffer[key]["2t"]
+                        sp = sfc_buffer[key]["sp"]
+
+                        ws  = np.sqrt(u ** 2 + v ** 2)
+                        rho = sp / (R_DRY_AIR * t)
+                        wpd = 0.5 * rho * ws ** 3
+
+                        mask = ~np.isnan(wpd)
+                        wpd_sum += np.where(mask, wpd, 0.0)
+                        ws_sum  += np.where(mask, ws,  0.0)
+                        rho_sum += np.where(mask, rho, 0.0)
+                        n_valid += mask.astype(np.int32)
+
+                        del sfc_buffer[key]
+
+                # --- Wave variables ---
+                elif sn in WAVE_VARS:
+                    if wave_lats is None:
+                        wave_lats, wave_lons = msg_lats, msg_lons
+
+                    if sn == "swh":
+                        swh_all.append(grid.astype(np.float32))
+                    elif sn == "mwp":
+                        mwp_all.append(grid.astype(np.float32))
+
+            finally:
+                eccodes.codes_release(msgid)
+
+            # Progress every 50 000 messages (~10%)
+            if n_total % 50_000 == 0:
+                print(f"    ... scanned {n_total:,} messages, "
+                      f"decoded {n_decoded:,} for {year}-{month:02d}",
+                      flush=True)
+
+    print(f"    Scan complete: {n_total:,} total messages, "
+          f"{n_decoded:,} decoded for {year}-{month:02d}")
+
+    # -- Build surface physics dataset --
+    if wpd_sum is None or n_valid is None:
+        print("    ERROR: No surface data found for this month!")
+        sys.exit(1)
+
+    safe_n = np.where(n_valid > 0, n_valid, 1)
+    no_data = n_valid == 0
+
+    wpd_mean = (wpd_sum / safe_n).astype(np.float32)
+    ws_mean  = (ws_sum  / safe_n).astype(np.float32)
+    rho_mean = (rho_sum / safe_n).astype(np.float32)
+    wpd_mean[no_data] = np.nan
+    ws_mean[no_data]  = np.nan
+    rho_mean[no_data] = np.nan
+
+    wind_ds = xr.Dataset(
+        {
+            "wpd_mean": (["lat", "lon"], wpd_mean),
+            "ws_mean":  (["lat", "lon"], ws_mean),
+            "rho_mean": (["lat", "lon"], rho_mean),
+        },
+        coords={"lat": sfc_lats, "lon": sfc_lons},
     )
-    ws  = np.sqrt(sub_wind[VAR_U100] ** 2 + sub_wind[VAR_V100] ** 2)
-    rho = sub_wind[VAR_SP] / (R_DRY_AIR * sub_wind[VAR_T2M])
-    wpd = 0.5 * rho * ws ** 3
 
-    wind_result = xr.Dataset({
-        "wpd_mean": wpd.mean(dim="time"),
-        "ws_mean":  ws.mean(dim="time"),
-        "rho_mean": rho.mean(dim="time"),
-    }).compute()
-    del sub_wind, ws, rho, wpd
+    del wpd_sum, ws_sum, rho_sum, n_valid, safe_n, no_data
     gc.collect()
-    print(f"      wind fields done", flush=True)
+    print("    Wind physics done.", flush=True)
 
-    # --- Step B: Wave height (separate compute to limit peak RAM) ---
-    sub_wave = ds[[VAR_SWH]].sel(
-        time=slice(t_start, t_end),
-        lat=LAT_SLICE,
-        lon=LON_SLICE,
+    # -- Build wave dataset --
+    if swh_all:
+        swh_stack = np.stack(swh_all, axis=0)
+        del swh_all
+        mwp_stack = np.stack(mwp_all, axis=0) if mwp_all else None
+        del mwp_all
+        gc.collect()
+
+        # Clean GRIB sentinel/fill values (9999 etc.) → NaN
+        swh_stack[swh_stack >= WAVE_SENTINEL] = np.nan
+        if mwp_stack is not None:
+            mwp_stack[mwp_stack >= WAVE_SENTINEL] = np.nan
+
+        wave_ds = xr.Dataset(
+            {
+                "swh_p90":  (["lat", "lon"], np.nanquantile(swh_stack, 0.90, axis=0).astype(np.float32)),
+                "swh_max":  (["lat", "lon"], np.nanmax(swh_stack, axis=0).astype(np.float32)),
+                "mwp_mean": (["lat", "lon"], np.nanmean(mwp_stack, axis=0).astype(np.float32) if mwp_stack is not None else np.full(swh_stack.shape[1:], np.nan, dtype=np.float32)),
+            },
+            coords={"lat": wave_lats, "lon": wave_lons},
+        )
+        del swh_stack, mwp_stack
+        gc.collect()
+
+        # Interpolate wave 0.5-deg → 0.25-deg to match surface grid
+        wave_ds = wave_ds.interp(
+            lat=sfc_lats, lon=sfc_lons, method="linear",
+        )
+        print("    Wave stats done.", flush=True)
+
+        physics_ds = xr.merge([wind_ds, wave_ds])
+        del wind_ds, wave_ds
+    else:
+        print("    WARNING: No wave data found — filling NaN.")
+        physics_ds = wind_ds
+        physics_ds["swh_p90"]  = xr.DataArray(np.full_like(wpd_mean, np.nan), dims=["lat", "lon"])
+        physics_ds["swh_max"]  = xr.DataArray(np.full_like(wpd_mean, np.nan), dims=["lat", "lon"])
+        physics_ds["mwp_mean"] = xr.DataArray(np.full_like(wpd_mean, np.nan), dims=["lat", "lon"])
+
+    gc.collect()
+    return physics_ds, lsm_grid, lsm_lats, lsm_lons
+
+
+# ------------------------------------------------------------------------------
+# SECTION 2 — Distance to Shore from land-sea mask
+# ------------------------------------------------------------------------------
+
+def compute_distance_to_shore(
+    lsm_grid: np.ndarray,
+    lsm_lats: np.ndarray,
+    lsm_lons: np.ndarray,
+    target_lats: np.ndarray,
+    target_lons: np.ndarray,
+) -> np.ndarray:
+    """
+    Compute approximate distance-to-shore (km) from land-sea mask.
+    Interpolates to target grid if grids differ.
+    """
+    print("    Computing distance to shore from land-sea mask ...")
+    land_binary = (lsm_grid > 0.5).astype(np.uint8)
+    dist_cells = distance_transform_edt(1 - land_binary)
+
+    lat_grid = np.abs(np.diff(lsm_lats).mean())
+    km_per_cell = lat_grid * 111.0
+    dist_km = (dist_cells * km_per_cell).astype(np.float32)
+
+    # If grids match, return directly; otherwise interpolate
+    if np.array_equal(lsm_lats, target_lats) and np.array_equal(lsm_lons, target_lons):
+        print(f"    Distance range: {dist_km.min():.1f} - {dist_km.max():.1f} km")
+        return dist_km
+
+    da = xr.DataArray(
+        dist_km,
+        dims=["lat", "lon"],
+        coords={"lat": lsm_lats, "lon": lsm_lons},
     )
-    wave_result = xr.Dataset({
-        "swh_p90": sub_wave[VAR_SWH].quantile(0.90, dim="time"),
-        "swh_max": sub_wave[VAR_SWH].max(dim="time"),
-    }).compute()
-    del sub_wave
-    gc.collect()
-    print(f"      wave fields done", flush=True)
-
-    return xr.merge([wind_result, wave_result])
+    da_interp = da.interp(lat=target_lats, lon=target_lons, method="nearest")
+    result = da_interp.values
+    print(f"    Distance range: {np.nanmin(result):.1f} - {np.nanmax(result):.1f} km")
+    return result
 
 
-def compute_annual_means(ds: xr.Dataset, year: int) -> xr.Dataset:
-    """
-    Process each month independently to bound peak memory.
-    Returns one Dataset with time-averaged fields over the full year.
-    """
-    print(f"\n[2] Computing physics for {year} ({len(MONTHS)} seasonal batches) ...")
-    monthly = []
-    for m in MONTHS:
-        try:
-            monthly.append(_physics_for_month(ds, year, m))
-        except Exception as e:
-            print(f"\n    [WARN] Month {m} failed: {e} — skipping.")
+# ------------------------------------------------------------------------------
+# SECTION 3 — "month" mode: stream GRIB → parquet
+# ------------------------------------------------------------------------------
 
-    if not monthly:
-        raise RuntimeError("All months failed — check GCS connectivity.")
+def run_single_month(month: int) -> None:
+    print(f"\n{'='*60}")
+    print(f"  Processing month {month} of {YEAR}")
+    print(f"{'='*60}\n")
 
-    # Stack months and take annual mean/max
-    stack = xr.concat(monthly, dim="month")
-    annual = xr.Dataset({
-        "wpd_mean_annual":  stack["wpd_mean"].mean(dim="month"),
-        "ws_mean_annual":   stack["ws_mean"].mean(dim="month"),
-        "rho_mean_annual":  stack["rho_mean"].mean(dim="month"),
-        "swh_p90_annual":   stack["swh_p90"].mean(dim="month"),
-        "swh_max_annual":   stack["swh_max"].max(dim="month"),
-    })
+    # 1. Stream GRIB
+    physics_ds, lsm_grid, lsm_lats, lsm_lons = _process_month_from_grib(
+        GRIB_PATH, YEAR, month,
+    )
 
-    # Drop xarray quantile coord artifact if present
-    for v in annual.data_vars:
-        if "quantile" in annual[v].coords:
-            annual[v] = annual[v].drop_vars("quantile")
+    # 2. Distance to shore
+    print(f"\n[2] Distance to shore ...")
+    sfc_lats = physics_ds.lat.values
+    sfc_lons = physics_ds.lon.values
 
-    print(f"\n    Annual mean WPD range: "
-          f"{float(annual['wpd_mean_annual'].min()):.1f} – "
-          f"{float(annual['wpd_mean_annual'].max()):.1f} W/m²")
-    return annual
+    if lsm_grid is not None:
+        dist_km = compute_distance_to_shore(
+            lsm_grid, lsm_lats, lsm_lons, sfc_lats, sfc_lons,
+        )
+    else:
+        print("    WARNING: No land-sea mask found — filling distance with NaN.")
+        dist_km = np.full((len(sfc_lats), len(sfc_lons)), np.nan, dtype=np.float32)
 
+    # 3. Flatten to DataFrame and save
+    print(f"\n[3] Exporting parquet ...")
+    lat2d, lon2d = np.meshgrid(sfc_lats, sfc_lons, indexing="ij")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 3 — Export gridded ERA5 results to Parquet
-# ─────────────────────────────────────────────────────────────────────────────
-
-def era5_to_parquet(annual: xr.Dataset, out_path: Path) -> pd.DataFrame:
-    """Flatten 2-D ERA5 annual means to a tidy DataFrame and save."""
-    print(f"\n[3] Exporting ERA5 annual means → {out_path} ...")
-
-    # Convert lon from 0–360 back to -180–180 for bathymetry join
-    lons_180 = annual["lon"].values.copy()
-    lons_180[lons_180 > 180] -= 360
-
-    lat2d, lon2d = np.meshgrid(annual["lat"].values,
-                               lons_180, indexing="ij")
     df = pd.DataFrame({
-        "lat":             lat2d.ravel(),
-        "lon":             lon2d.ravel(),
-        "wpd_mean_annual": annual["wpd_mean_annual"].values.ravel(),
-        "ws_mean_annual":  annual["ws_mean_annual"].values.ravel(),
-        "rho_mean_annual": annual["rho_mean_annual"].values.ravel(),
-        "swh_p90_annual":  annual["swh_p90_annual"].values.ravel(),
-        "swh_max_annual":  annual["swh_max_annual"].values.ravel(),
-    }).dropna(subset=["wpd_mean_annual"])
+        "lat":              lat2d.ravel(),
+        "lon":              lon2d.ravel(),
+        "wpd_mean":         physics_ds["wpd_mean"].values.ravel(),
+        "ws_mean":          physics_ds["ws_mean"].values.ravel(),
+        "rho_mean":         physics_ds["rho_mean"].values.ravel(),
+        "swh_p90":          physics_ds["swh_p90"].values.ravel(),
+        "swh_max":          physics_ds["swh_max"].values.ravel(),
+        "mwp_mean":         physics_ds["mwp_mean"].values.ravel(),
+        "dist_to_shore_km": dist_km.ravel(),
+    }).dropna(subset=["wpd_mean"])
 
-    # Round lat/lon to ERA5 grid precision for join key
     df["lat"] = df["lat"].round(4)
     df["lon"] = df["lon"].round(4)
 
+    del physics_ds, lsm_grid, dist_km
+    gc.collect()
+
+    out_path = _month_parquet_path(month)
     df.to_parquet(out_path, index=False)
-    print(f"    Rows: {len(df):,}  |  File: {out_path.stat().st_size/1e6:.1f} MB")
-    return df
+    print(f"\n    Saved -> {out_path}")
+    print(f"    Rows: {len(df):,}  |  File: {out_path.stat().st_size / 1e6:.1f} MB")
+    print(f"    WPD range: {df['wpd_mean'].min():.1f} - {df['wpd_mean'].max():.1f} W/m2")
+    print(f"\n[Done] Month {month} complete.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 4 — Spatial Join & Golden Zone filter via DuckDB
-# ─────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
+# SECTION 4 — "aggregate" mode: combine monthly parquets → suitability
+# ------------------------------------------------------------------------------
+
+def run_aggregate() -> None:
+    print(f"\n{'='*60}")
+    print(f"  Aggregating monthly parquets → Suitability Analysis")
+    print(f"{'='*60}\n")
+
+    available = []
+    for m in range(1, 13):
+        p = _month_parquet_path(m)
+        if p.exists():
+            available.append((m, p))
+
+    if not available:
+        print("ERROR: No monthly parquets found! Run 'month <N>' first.")
+        sys.exit(1)
+
+    months_found = [m for m, _ in available]
+    print(f"[1] Found {len(available)}/12 monthly parquets: {months_found}")
+    if len(available) < 12:
+        missing = [m for m in range(1, 13) if m not in months_found]
+        print(f"    Missing months: {missing}")
+        print(f"    Proceeding with available data ...\n")
+
+    print("[2] Computing annual means ...")
+    frames = []
+    for m, p in available:
+        df = pd.read_parquet(p)
+        df["_month"] = m
+        frames.append(df)
+        print(f"    Month {m:2d}: {len(df):,} rows, "
+              f"WPD {df['wpd_mean'].min():.0f}-{df['wpd_mean'].max():.0f} W/m2")
+
+    all_months = pd.concat(frames, ignore_index=True)
+
+    # Clean any residual sentinel values (9999) from older monthly parquets
+    for col in ["swh_p90", "swh_max", "mwp_mean"]:
+        if col in all_months.columns:
+            all_months.loc[all_months[col] >= WAVE_SENTINEL, col] = np.nan
+
+    annual = all_months.groupby(["lat", "lon"], as_index=False).agg(
+        wpd_mean_annual  = ("wpd_mean",  "mean"),
+        ws_mean_annual   = ("ws_mean",   "mean"),
+        rho_mean_annual  = ("rho_mean",  "mean"),
+        swh_p90_annual   = ("swh_p90",   "mean"),
+        swh_max_annual   = ("swh_max",   "max"),
+        mwp_mean_annual  = ("mwp_mean",  "mean"),
+        dist_to_shore_km = ("dist_to_shore_km", "first"),
+    )
+
+    annual.to_parquet(ERA5_PQ, index=False)
+    print(f"\n    Annual means -> {ERA5_PQ}")
+    print(f"    Rows: {len(annual):,}  |  File: {ERA5_PQ.stat().st_size / 1e6:.1f} MB")
+    print(f"    Annual WPD range: {annual['wpd_mean_annual'].min():.1f} - "
+          f"{annual['wpd_mean_annual'].max():.1f} W/m2")
+
+    del all_months, frames
+    gc.collect()
+
+    golden = spatial_join_golden_zones(ERA5_PQ, BATHY_PQ, RESULT_PQ)
+    prime = compute_suitability_and_cluster(golden)
+    plot_wpd_heatmap(annual, OUT_DIR / "wpd_heatmap.png")
+    plot_golden_zones(golden, OUT_DIR / "golden_zones.png")
+    print_top5_report(golden)
+
+    print(f"\n[Done] All outputs written.")
+
+
+# ------------------------------------------------------------------------------
+# SECTION 5 — Spatial Join & Golden Zone filter via DuckDB
+# ------------------------------------------------------------------------------
 
 GOLDEN_ZONE_SQL = """
 WITH era5 AS (
@@ -243,12 +489,14 @@ WITH era5 AS (
         rho_mean_annual,
         swh_p90_annual,
         swh_max_annual,
-        -- Nearest-neighbour snap to 0.25° ERA5 grid
+        mwp_mean_annual,
+        dist_to_shore_km,
         ROUND(lat / 0.25) * 0.25  AS lat_snap,
         ROUND(lon / 0.25) * 0.25  AS lon_snap
     FROM read_parquet('{era5_pq}')
     WHERE wpd_mean_annual >= {wpd_min}
-      AND swh_max_annual  <  {swh_max}
+      AND (swh_p90_annual  < {swh_p90_max} OR swh_p90_annual IS NULL)
+      AND (swh_max_annual  < {swh_max_hard} OR swh_max_annual IS NULL)
 ),
 bathy AS (
     SELECT
@@ -276,142 +524,214 @@ joined AS (
         e.rho_mean_annual,
         e.swh_p90_annual,
         e.swh_max_annual,
-        -- Composite risk score: higher WPD, lower depth variance & slope = better
+        e.mwp_mean_annual,
+        e.dist_to_shore_km,
         (e.wpd_mean_annual / 1000.0)
             * (1.0 - LEAST(b.slope_deg / 30.0, 1.0))
-            * (1.0 - LEAST(e.swh_max_annual / 5.0, 1.0))
+            * (1.0 - LEAST(COALESCE(e.swh_p90_annual, 0) / 8.0, 1.0))
             AS composite_score
     FROM era5 e
     INNER JOIN bathy b
         ON e.lat_snap = b.lat_snap
        AND e.lon_snap = b.lon_snap
-    WHERE NOT b.slope_unstable     -- exclude structurally unstable seafloor
+    WHERE NOT b.slope_unstable
 )
 SELECT * FROM joined
 ORDER BY composite_score DESC
 """
 
 
-def spatial_join_golden_zones(era5_pq: Path, bathy_pq: Path,
-                               result_pq: Path) -> pd.DataFrame:
-    """
-    Use DuckDB to join ERA5 physics with bathymetry, apply Golden Zone filters,
-    and write the result to Parquet.
-    """
-    print(f"\n[4] DuckDB spatial join — filtering Golden Zones ...")
-    print(f"    Filters: WPD > {WPD_MIN_W_M2} W/m², "
-          f"depth {DEPTH_MIN_M}–{DEPTH_MAX_M} m, "
-          f"max SWH < {SWH_MAX_M} m, slope stable")
+def spatial_join_golden_zones(
+    era5_pq: Path,
+    bathy_pq: Path,
+    result_pq: Path,
+) -> pd.DataFrame:
+    print(f"\n[3] DuckDB spatial join - filtering Golden Zones ...")
+    print(f"    Filters: WPD >= {WPD_MIN_W_M2} W/m2, "
+          f"depth {DEPTH_MIN_M}-{DEPTH_MAX_M} m, "
+          f"SWH p90 < {SWH_P90_MAX} m, SWH max < {SWH_MAX_HARD} m, slope stable")
 
     sql = GOLDEN_ZONE_SQL.format(
         era5_pq=str(era5_pq),
         bathy_pq=str(bathy_pq),
         wpd_min=WPD_MIN_W_M2,
-        swh_max=SWH_MAX_M,
+        swh_p90_max=SWH_P90_MAX,
+        swh_max_hard=SWH_MAX_HARD,
         d_min=DEPTH_MIN_M,
         d_max=DEPTH_MAX_M,
     )
 
     con = duckdb.connect()
-    df  = con.execute(sql).df()
+    df = con.execute(sql).df()
     con.close()
 
+    df = df.sort_values("composite_score", ascending=False).reset_index(drop=True)
     df.to_parquet(result_pq, index=False)
     print(f"    Golden Zone cells found: {len(df):,}")
-    print(f"    Saved → {result_pq}")
+    print(f"    Saved -> {result_pq}")
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 5 — Visualisations
-# ─────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
+# SECTION 6 — Normalized Suitability Score + DBSCAN Clustering
+# ------------------------------------------------------------------------------
 
-def plot_wpd_heatmap(annual: xr.Dataset, out_path: Path) -> None:
+def compute_suitability_and_cluster(golden_df: pd.DataFrame) -> pd.DataFrame:
+    print(f"\n[4] Computing Normalized Suitability Score ...")
+
+    if golden_df.empty:
+        print("    No data to score.")
+        return golden_df
+
+    df = golden_df.copy()
+
+    scaler = MinMaxScaler()
+    wpd_norm = scaler.fit_transform(df[["wpd_mean_annual"]])[:, 0]
+
+    wave_norm = MinMaxScaler().fit_transform(df[["swh_max_annual"]])[:, 0]
+    wave_calm = 1.0 - wave_norm
+
+    depth_vals = df["depth_m"].values
+    ideal_depth = np.where(depth_vals <= 60, 37.5, 180.0)
+    max_deviation = np.where(depth_vals <= 60, 22.5, 120.0)
+    depth_factor = 1.0 - np.clip(
+        np.abs(depth_vals - ideal_depth) / max_deviation, 0, 1
+    )
+
+    df["suitability"] = W_WPD * wpd_norm + W_DEPTH * depth_factor + W_WAVE * wave_calm
+
+    print(f"    Suitability range: {df['suitability'].min():.3f} - "
+          f"{df['suitability'].max():.3f}")
+
+    threshold = df["suitability"].quantile(0.90)
+    top10 = df[df["suitability"] >= threshold].copy()
+    print(f"    Top 10% threshold: {threshold:.3f}  ({len(top10):,} cells)")
+
+    print(f"    DBSCAN eps={DBSCAN_EPS} deg, min_samples={DBSCAN_MIN_PTS} ...")
+    coords = top10[["lat", "lon"]].values
+    clustering = DBSCAN(eps=DBSCAN_EPS, min_samples=DBSCAN_MIN_PTS).fit(coords)
+    top10["cluster_id"] = clustering.labels_
+
+    n_clusters = len(set(clustering.labels_) - {-1})
+    n_noise    = (clustering.labels_ == -1).sum()
+    print(f"    Clusters found: {n_clusters}  |  Noise points: {n_noise}")
+
+    df["cluster_id"] = -1
+    df.loc[top10.index, "cluster_id"] = top10["cluster_id"].values
+
+    df = df.sort_values("suitability", ascending=False).reset_index(drop=True)
+    df.to_parquet(PRIME_PQ, index=False)
+    print(f"    Saved -> {PRIME_PQ}")
+
+    if n_clusters > 0:
+        cluster_cells = top10[top10["cluster_id"] >= 0]
+        cluster_sizes = (
+            cluster_cells.groupby("cluster_id")
+            .size()
+            .sort_values(ascending=False)
+        )
+        top3_ids = cluster_sizes.head(3).index.tolist()
+
+        print(f"\n    === TOP {min(3, n_clusters)} CLUSTER CENTERS ===")
+        for rank, cid in enumerate(top3_ids, 1):
+            members = cluster_cells[cluster_cells["cluster_id"] == cid]
+            center_lat = members["lat"].mean()
+            center_lon = members["lon"].mean()
+            mean_suit  = members["suitability"].mean()
+            print(f"    Cluster {rank} (id={cid}): "
+                  f"center=({center_lat:.2f}N, {center_lon:.2f}E), "
+                  f"cells={len(members)}, "
+                  f"mean_suitability={mean_suit:.3f}")
+
+    return df
+
+
+# ------------------------------------------------------------------------------
+# SECTION 7 — Visualisations
+# ------------------------------------------------------------------------------
+
+def plot_wpd_heatmap(annual_df: pd.DataFrame, out_path: Path) -> None:
     print("\n[5a] Plotting WPD heatmap ...")
-    wpd = annual["wpd_mean_annual"]
-    lons, lats = annual["lon"].values, annual["lat"].values
+    lats = np.sort(annual_df["lat"].unique())
+    lons = np.sort(annual_df["lon"].unique())
 
-    fig, ax = plt.subplots(figsize=(14, 7), dpi=150)
+    wpd_pivot = annual_df.pivot_table(
+        values="wpd_mean_annual", index="lat", columns="lon",
+    ).reindex(index=lats, columns=lons)
+
+    fig, ax = plt.subplots(figsize=(14, 7), dpi=100)
     cmap = cmocean.cm.matter if HAS_CMOCEAN else plt.cm.YlOrRd
     cmap.set_bad("#d0d0d0")
-    vmax = float(np.nanpercentile(wpd.values, 99))
+    vmax = float(np.nanpercentile(wpd_pivot.values, 99))
 
-    img = ax.pcolormesh(lons, lats, wpd.values,
+    img = ax.pcolormesh(lons, lats, wpd_pivot.values,
                         cmap=cmap, vmin=0, vmax=vmax,
                         shading="auto", rasterized=True)
     cbar = fig.colorbar(img, ax=ax, fraction=0.025, pad=0.02)
-    cbar.set_label("Mean WPD (W/m²)", fontsize=11)
-    ax.set_title(f"ERA5 {YEAR} — Annual Mean Wind Power Density (100 m)",
+    cbar.set_label("Mean WPD (W/m2)", fontsize=11)
+    ax.set_title(f"ERA5 {YEAR} - Annual Mean Wind Power Density (100 m)",
                  fontsize=13, fontweight="bold")
-    ax.set_xlabel("Longitude (°)"); ax.set_ylabel("Latitude (°)")
+    ax.set_xlabel("Longitude"); ax.set_ylabel("Latitude")
     fig.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    fig.savefig(out_path, dpi=100, bbox_inches="tight")
     plt.close(fig)
-    print(f"    Saved → {out_path}")
-    print(f"    Key trend: highest WPD offshore the US East Coast "
-          f"and Gulf of Alaska — consistent with prevailing westerlies.")
+    print(f"    Saved -> {out_path}")
 
 
 def plot_golden_zones(gdf: pd.DataFrame, out_path: Path) -> None:
     print("\n[5b] Plotting Golden Zone scatter ...")
     if gdf.empty:
-        print("    No Golden Zone cells — skipping plot.")
+        print("    No Golden Zone cells - skipping plot.")
         return
 
-    fig, ax = plt.subplots(figsize=(14, 7), dpi=150)
+    fig, ax = plt.subplots(figsize=(14, 7), dpi=100)
     sc = ax.scatter(gdf["lon"], gdf["lat"],
                     c=gdf["wpd_mean_annual"], cmap="YlOrRd",
                     s=8, alpha=0.7, edgecolors="none",
                     vmin=WPD_MIN_W_M2,
                     vmax=float(gdf["wpd_mean_annual"].quantile(0.99)))
     cbar = fig.colorbar(sc, ax=ax, fraction=0.025, pad=0.02)
-    cbar.set_label("Mean WPD (W/m²)", fontsize=10)
+    cbar.set_label("Mean WPD (W/m2)", fontsize=10)
 
-    # Annotate Top 5
     top5 = gdf.head(5)
     for i, row in top5.iterrows():
-        ax.annotate(f"#{i+1}\n{row['lat']:.2f}°N\n{row['lon']:.2f}°",
+        ax.annotate(f"#{i+1}\n{row['lat']:.2f}N\n{row['lon']:.2f}",
                     xy=(row["lon"], row["lat"]),
                     xytext=(row["lon"] + 1, row["lat"] + 0.5),
                     fontsize=7, color="navy",
                     arrowprops=dict(arrowstyle="->", color="navy", lw=0.8))
 
-    ax.set_xlim(-165, -55); ax.set_ylim(15, 85)
-    ax.set_title(f"ERA5 {YEAR} — Offshore Wind Golden Zones\n"
-                 f"(WPD>{WPD_MIN_W_M2} W/m², depth {DEPTH_MIN_M}–{DEPTH_MAX_M} m, "
-                 f"SWH<{SWH_MAX_M} m)",
+    ax.set_title(f"ERA5 {YEAR} - Offshore Wind Golden Zones\n"
+                 f"(WPD≥{WPD_MIN_W_M2} W/m², depth {DEPTH_MIN_M}-{DEPTH_MAX_M} m, "
+                 f"SWH p90<{SWH_P90_MAX} m)",
                  fontsize=12, fontweight="bold")
-    ax.set_xlabel("Longitude (°)"); ax.set_ylabel("Latitude (°)")
+    ax.set_xlabel("Longitude"); ax.set_ylabel("Latitude")
     ax.grid(True, linestyle="--", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    fig.savefig(out_path, dpi=100, bbox_inches="tight")
     plt.close(fig)
-    print(f"    Saved → {out_path}")
+    print(f"    Saved -> {out_path}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 6 — Top 5 Summary Report
-# ─────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
+# SECTION 8 — Top 5 Summary Report
+# ------------------------------------------------------------------------------
 
 FOUNDATION_LABELS = {
-    0: "Monopile (0–15 m)",
-    1: "Jacket/Fixed (15–60 m)",
-    2: "Floating (60–300 m)",
+    0: "Monopile (0-15 m)",
+    1: "Jacket/Fixed (15-60 m)",
+    2: "Floating (60-300 m)",
     3: "Infeasible (>300 m)",
 }
 
 
 def print_top5_report(gdf: pd.DataFrame) -> None:
     print("\n" + "=" * 70)
-    print(f"  TOP 5 GOLDEN ZONE SITES — ERA5 {YEAR} + GEBCO 2025")
+    print(f"  TOP 5 GOLDEN ZONE SITES - ERA5 {YEAR} + GEBCO 2025")
     print("=" * 70)
 
     if gdf.empty:
         print("  No sites passed all Golden Zone filters.")
-        print("  Suggestions:")
-        print("  • Widen SWH threshold (currently < 2.5 m)")
-        print("  • Expand depth range beyond 15–60 m (include Floating)")
-        print("  • Lower WPD floor below 400 W/m²")
         return
 
     cols = ["lat", "lon", "depth_m", "wpd_mean_annual",
@@ -425,51 +745,61 @@ def print_top5_report(gdf: pd.DataFrame) -> None:
 
     for rank, row in top5.iterrows():
         energy_risk = "HIGH" if row["wpd_mean_annual"] > 600 else "MODERATE"
-        eng_risk    = ("LOW"  if not gdf.loc[rank, "slope_unstable"]
-                              and row["swh_max_annual"] < 1.5
-                       else "MODERATE")
-        print(f"\n  #{rank + 1}  ({row['lat']:.3f}°N, {row['lon']:.3f}°)")
+        eng_risk = ("LOW" if not gdf.iloc[rank]["slope_unstable"]
+                          and row["swh_max_annual"] < 1.5
+                    else "MODERATE")
+        print(f"\n  #{rank + 1}  ({row['lat']:.3f}N, {row['lon']:.3f})")
         print(f"       Foundation    : {row['foundation_type']}")
         print(f"       Depth         : {row['depth_m']:.1f} m")
-        print(f"       Mean WPD      : {row['wpd_mean_annual']:.1f} W/m²")
+        print(f"       Mean WPD      : {row['wpd_mean_annual']:.1f} W/m2")
         print(f"       Mean Wind     : {row['ws_mean_annual']:.2f} m/s")
         print(f"       Max Wave Ht   : {row['swh_max_annual']:.2f} m")
-        print(f"       Slope         : {row['slope_deg']:.2f}°")
-        print(f"       Composite Score: {row['composite_score']:.4f}")
-        print(f"       Energy Potential: {energy_risk} | Engineering Risk: {eng_risk}")
+        print(f"       Slope         : {row['slope_deg']:.2f} deg")
+        print(f"       Composite     : {row['composite_score']:.4f}")
+        print(f"       Energy Pot.   : {energy_risk} | Eng. Risk: {eng_risk}")
 
     print("\n" + "=" * 70)
     print(f"  Total qualifying cells: {len(gdf):,}")
-    print(f"  Full results → {RESULT_PQ}")
+    print(f"  Full results -> {RESULT_PQ}")
     print("=" * 70)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 # Main
-# ─────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 
 def main() -> None:
+    if len(sys.argv) < 2:
+        print("Usage:")
+        print(f"  python {sys.argv[0]} month <1-12>    Process a single month")
+        print(f"  python {sys.argv[0]} aggregate        Combine monthly parquets -> suitability")
+        print()
+        print("Example workflow:")
+        print("  for m in 1 2 3 4 5 6 7 8 9 10 11 12; do")
+        print(f"    python {sys.argv[0]} month $m")
+        print("  done")
+        print(f"  python {sys.argv[0]} aggregate")
+        sys.exit(1)
+
+    mode = sys.argv[1].lower()
+
     try:
-        # 1. Open ERA5
-        ds_era5 = open_era5_lazy()
+        if mode == "month":
+            if len(sys.argv) < 3:
+                print("ERROR: specify month number (1-12)")
+                sys.exit(1)
+            month = int(sys.argv[2])
+            if not 1 <= month <= 12:
+                print("ERROR: month must be 1-12")
+                sys.exit(1)
+            run_single_month(month)
 
-        # 2. Compute annual means (monthly batches)
-        annual = compute_annual_means(ds_era5, YEAR)
+        elif mode == "aggregate":
+            run_aggregate()
 
-        # 3. Export ERA5 parquet
-        era5_df = era5_to_parquet(annual, ERA5_PQ)
-
-        # 4. DuckDB join → Golden Zones
-        golden = spatial_join_golden_zones(ERA5_PQ, BATHY_PQ, RESULT_PQ)
-
-        # 5. Plots
-        plot_wpd_heatmap(annual, OUT_DIR / "wpd_heatmap.png")
-        plot_golden_zones(golden, OUT_DIR / "golden_zones.png")
-
-        # 6. Report
-        print_top5_report(golden)
-
-        print("\n[Done] All outputs written.")
+        else:
+            print(f"Unknown mode: '{mode}'. Use 'month' or 'aggregate'.")
+            sys.exit(1)
 
     except Exception:
         traceback.print_exc()

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/Users/Sid/Code/Datathon -maxdepth 3 -not -path */.venv/* -not -path */__pycache__/* -type f)",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(python -c \":*)",
+      "Bash(claude plugin:*)",
+      "Bash(git:*)",
+      "Bash(ls -la ~/.claude/hooks*)"
+    ]
+  }
+}
