@@ -653,8 +653,10 @@
            TITLE SLIDE
            =========================================== */
         .title-slide .slide-content {
-            justify-content: flex-end;
-            padding-bottom: clamp(3rem, 8vh, 8rem);
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            padding-bottom: var(--slide-padding);
         }
 
         .title-meta {
@@ -663,6 +665,12 @@
             text-transform: uppercase;
             letter-spacing: 0.12em;
             margin-bottom: clamp(0.5rem, 1.5vw, 1.5rem);
+        }
+
+        .title-slide .accent-card {
+            width: min(88vw, 980px);
+            max-width: none;
+            padding: clamp(1.5rem, 3.2vw, 3.5rem);
         }
 
         /* ===========================================
