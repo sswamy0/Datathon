@@ -1,0 +1,1265 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Offshore Wind Portfolio Optimization</title>
+
+    <!-- Fonts: Archivo Black + Space Grotesk from Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Space+Grotesk:wght@400;500;600;700&display=swap"
+        rel="stylesheet">
+
+    <style>
+        /* ===========================================
+           CSS CUSTOM PROPERTIES (BOLD SIGNAL THEME)
+           =========================================== */
+        :root {
+            --bg-primary: #0e1117;
+            --bg-gradient: linear-gradient(135deg, #0e1117 0%, #1a1e2e 50%, #0e1117 100%);
+            --card-bg: #FF5722;
+            --card-bg-alt: #00B8D4;
+            --card-bg-gold: #FFB300;
+            --card-bg-green: #00C853;
+            --text-primary: #f0f0f0;
+            --text-secondary: #8892a4;
+            --text-on-card: #0e1117;
+            --accent: #FF5722;
+            --accent-blue: #00B8D4;
+            --accent-gold: #FFB300;
+            --border-subtle: rgba(255, 255, 255, 0.06);
+
+            --font-display: 'Archivo Black', sans-serif;
+            --font-body: 'Space Grotesk', sans-serif;
+
+            --title-size: clamp(2rem, 6vw, 5rem);
+            --h2-size: clamp(1.4rem, 3.5vw, 2.6rem);
+            --h3-size: clamp(1rem, 2.2vw, 1.5rem);
+            --body-size: clamp(0.8rem, 1.4vw, 1.1rem);
+            --small-size: clamp(0.65rem, 1vw, 0.85rem);
+            --stat-size: clamp(2rem, 5vw, 4.5rem);
+
+            --slide-padding: clamp(1.5rem, 4vw, 4rem);
+            --content-gap: clamp(0.75rem, 2vw, 2rem);
+            --element-gap: clamp(0.25rem, 1vw, 1rem);
+
+            --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+            --duration-normal: 0.6s;
+        }
+
+        /* ===========================================
+           BASE RESET
+           =========================================== */
+        *,
+        *::before,
+        *::after {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: var(--font-body);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* ===========================================
+           VIEWPORT FITTING: MANDATORY BASE STYLES
+           =========================================== */
+        html,
+        body {
+            height: 100%;
+            overflow-x: hidden;
+        }
+
+        html {
+            scroll-snap-type: y mandatory;
+            scroll-behavior: smooth;
+        }
+
+        .slide {
+            width: 100vw;
+            height: 100vh;
+            height: 100dvh;
+            overflow: hidden;
+            scroll-snap-align: start;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+
+        .slide-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            max-height: 100%;
+            overflow: hidden;
+            padding: var(--slide-padding);
+        }
+
+        .card,
+        .container,
+        .content-box {
+            max-width: min(90vw, 1000px);
+            max-height: min(80vh, 700px);
+        }
+
+        .feature-list,
+        .bullet-list {
+            gap: clamp(0.4rem, 1vh, 1rem);
+        }
+
+        .feature-list li,
+        .bullet-list li {
+            font-size: var(--body-size);
+            line-height: 1.4;
+        }
+
+        img,
+        .image-container {
+            max-width: 100%;
+            max-height: min(50vh, 400px);
+            object-fit: contain;
+        }
+
+        /* Short viewports */
+        @media (max-height: 700px) {
+            :root {
+                --slide-padding: clamp(0.75rem, 3vw, 2rem);
+                --content-gap: clamp(0.4rem, 1.5vw, 1rem);
+                --title-size: clamp(1.25rem, 4.5vw, 2.5rem);
+                --h2-size: clamp(1rem, 3vw, 1.75rem);
+            }
+        }
+
+        @media (max-height: 600px) {
+            :root {
+                --slide-padding: clamp(0.5rem, 2.5vw, 1.5rem);
+                --content-gap: clamp(0.3rem, 1vw, 0.75rem);
+                --title-size: clamp(1.1rem, 4vw, 2rem);
+                --body-size: clamp(0.7rem, 1.2vw, 0.95rem);
+            }
+
+            .nav-dots,
+            .keyboard-hint,
+            .decorative {
+                display: none;
+            }
+        }
+
+        @media (max-height: 500px) {
+            :root {
+                --slide-padding: clamp(0.4rem, 2vw, 1rem);
+                --title-size: clamp(1rem, 3.5vw, 1.5rem);
+                --h2-size: clamp(0.9rem, 2.5vw, 1.25rem);
+                --body-size: clamp(0.65rem, 1vw, 0.85rem);
+            }
+        }
+
+        @media (max-width: 600px) {
+            :root {
+                --title-size: clamp(1.25rem, 7vw, 2.5rem);
+            }
+
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+
+            *,
+            *::before,
+            *::after {
+                animation-duration: 0.01ms !important;
+                transition-duration: 0.2s !important;
+            }
+
+            html {
+                scroll-behavior: auto;
+            }
+        }
+
+        /* ===========================================
+           SLIDE BACKGROUNDS
+           =========================================== */
+        .slide {
+            background: var(--bg-gradient);
+        }
+
+        .grid-overlay::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+            background-size: 60px 60px;
+            pointer-events: none;
+        }
+
+        /* ===========================================
+           SECTION NUMBER (Top-left)
+           =========================================== */
+        .section-number {
+            position: absolute;
+            top: var(--slide-padding);
+            left: var(--slide-padding);
+            font-family: var(--font-display);
+            font-size: clamp(0.7rem, 1.2vw, 1rem);
+            color: var(--text-secondary);
+            letter-spacing: 0.1em;
+            z-index: 2;
+        }
+
+        /* ===========================================
+           TYPOGRAPHY
+           =========================================== */
+        h1 {
+            font-family: var(--font-display);
+            font-size: var(--title-size);
+            line-height: 1.05;
+            letter-spacing: -0.02em;
+            text-transform: uppercase;
+        }
+
+        h2 {
+            font-family: var(--font-display);
+            font-size: var(--h2-size);
+            line-height: 1.15;
+            letter-spacing: -0.01em;
+            text-transform: uppercase;
+        }
+
+        h3 {
+            font-family: var(--font-body);
+            font-size: var(--h3-size);
+            font-weight: 600;
+            line-height: 1.3;
+        }
+
+        p,
+        li {
+            font-family: var(--font-body);
+            font-size: var(--body-size);
+            line-height: 1.6;
+            color: var(--text-secondary);
+        }
+
+        .subtitle {
+            font-size: clamp(0.9rem, 1.8vw, 1.3rem);
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-top: var(--element-gap);
+        }
+
+        .accent-text {
+            color: var(--accent);
+        }
+
+        .blue-text {
+            color: var(--accent-blue);
+        }
+
+        .gold-text {
+            color: var(--accent-gold);
+        }
+
+        /* ===========================================
+           COLORED CARD COMPONENT (Bold Signal signature)
+           =========================================== */
+        .accent-card {
+            background: var(--card-bg);
+            color: var(--text-on-card);
+            border-radius: clamp(8px, 1.5vw, 16px);
+            padding: clamp(1rem, 2.5vw, 2.5rem);
+            max-width: min(85vw, 700px);
+        }
+
+        .accent-card h2,
+        .accent-card h3,
+        .accent-card p {
+            color: var(--text-on-card);
+        }
+
+        .accent-card.blue {
+            background: var(--card-bg-alt);
+        }
+
+        .accent-card.gold {
+            background: var(--card-bg-gold);
+        }
+
+        .accent-card.green {
+            background: var(--card-bg-green);
+        }
+
+        /* ===========================================
+           STAT BLOCKS
+           =========================================== */
+        .stats-row {
+            display: flex;
+            gap: clamp(1rem, 3vw, 3rem);
+            flex-wrap: wrap;
+            margin-top: var(--content-gap);
+        }
+
+        .stat-block {
+            text-align: center;
+            min-width: clamp(80px, 12vw, 160px);
+        }
+
+        .stat-value {
+            font-family: var(--font-display);
+            font-size: var(--stat-size);
+            line-height: 1;
+            color: var(--text-primary);
+        }
+
+        .stat-label {
+            font-size: var(--small-size);
+            color: var(--text-secondary);
+            margin-top: clamp(0.2rem, 0.5vw, 0.5rem);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        /* ===========================================
+           IMAGE SLIDES
+           =========================================== */
+        .image-row {
+            display: flex;
+            gap: clamp(0.5rem, 1.5vw, 1.5rem);
+            margin-top: var(--content-gap);
+            align-items: center;
+            justify-content: center;
+            flex-wrap: nowrap;
+        }
+
+        .image-row img {
+            max-height: min(42vh, 360px);
+            border-radius: clamp(4px, 0.8vw, 8px);
+            border: 1px solid var(--border-subtle);
+        }
+
+        .single-image {
+            display: flex;
+            justify-content: center;
+            margin-top: var(--content-gap);
+        }
+
+        .single-image img {
+            max-height: min(55vh, 440px);
+            border-radius: clamp(4px, 0.8vw, 8px);
+            border: 1px solid var(--border-subtle);
+        }
+
+        /* ===========================================
+           BULLET LISTS
+           =========================================== */
+        .content-list {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: clamp(0.4rem, 1vh, 0.9rem);
+            margin-top: var(--content-gap);
+        }
+
+        .content-list li {
+            display: flex;
+            align-items: flex-start;
+            gap: clamp(0.4rem, 0.8vw, 0.8rem);
+        }
+
+        .content-list li::before {
+            content: '';
+            flex-shrink: 0;
+            width: clamp(6px, 0.5vw, 8px);
+            height: clamp(6px, 0.5vw, 8px);
+            background: var(--accent);
+            border-radius: 50%;
+            margin-top: clamp(0.4rem, 0.6vw, 0.55rem);
+        }
+
+        .content-list li.blue::before {
+            background: var(--accent-blue);
+        }
+
+        .content-list li.gold::before {
+            background: var(--accent-gold);
+        }
+
+        /* ===========================================
+           TWO COLUMN LAYOUT
+           =========================================== */
+        .two-col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: clamp(1rem, 3vw, 3rem);
+            align-items: center;
+            margin-top: var(--content-gap);
+        }
+
+        @media (max-width: 768px) {
+            .two-col {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* ===========================================
+           PIPELINE STEPS
+           =========================================== */
+        .pipeline {
+            display: flex;
+            gap: clamp(0.3rem, 0.8vw, 0.8rem);
+            margin-top: var(--content-gap);
+            align-items: stretch;
+            flex-wrap: nowrap;
+        }
+
+        .pipeline-step {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border-subtle);
+            border-radius: clamp(6px, 1vw, 12px);
+            padding: clamp(0.6rem, 1.2vw, 1.2rem);
+            text-align: center;
+            position: relative;
+        }
+
+        .pipeline-step .step-num {
+            font-family: var(--font-display);
+            font-size: clamp(0.6rem, 1vw, 0.9rem);
+            color: var(--accent);
+            margin-bottom: clamp(0.2rem, 0.4vw, 0.4rem);
+        }
+
+        .pipeline-step .step-title {
+            font-weight: 600;
+            font-size: var(--small-size);
+            color: var(--text-primary);
+            line-height: 1.3;
+        }
+
+        .pipeline-step .step-detail {
+            font-size: clamp(0.55rem, 0.8vw, 0.75rem);
+            color: var(--text-secondary);
+            margin-top: clamp(0.15rem, 0.3vw, 0.3rem);
+            line-height: 1.3;
+        }
+
+        .pipeline-arrow {
+            display: flex;
+            align-items: center;
+            color: var(--text-secondary);
+            font-size: clamp(0.7rem, 1vw, 1rem);
+            flex-shrink: 0;
+        }
+
+        /* ===========================================
+           KEY FINDING CALLOUT
+           =========================================== */
+        .callout {
+            background: rgba(255, 87, 34, 0.08);
+            border-left: 3px solid var(--accent);
+            padding: clamp(0.6rem, 1.5vw, 1.5rem);
+            border-radius: 0 clamp(4px, 0.6vw, 8px) clamp(4px, 0.6vw, 8px) 0;
+            margin-top: var(--content-gap);
+        }
+
+        .callout.blue {
+            background: rgba(0, 184, 212, 0.08);
+            border-left-color: var(--accent-blue);
+        }
+
+        .callout p {
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+
+        /* ===========================================
+           TABLE
+           =========================================== */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: var(--content-gap);
+            font-size: var(--small-size);
+        }
+
+        .data-table th {
+            text-align: left;
+            padding: clamp(0.3rem, 0.6vw, 0.6rem) clamp(0.5rem, 1vw, 1rem);
+            border-bottom: 2px solid var(--accent);
+            color: var(--text-primary);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .data-table td {
+            padding: clamp(0.25rem, 0.5vw, 0.5rem) clamp(0.5rem, 1vw, 1rem);
+            border-bottom: 1px solid var(--border-subtle);
+            color: var(--text-secondary);
+        }
+
+        .data-table tr.highlight td {
+            color: var(--text-primary);
+            font-weight: 600;
+            background: rgba(255, 87, 34, 0.06);
+        }
+
+        /* ===========================================
+           PROGRESS BAR
+           =========================================== */
+        .progress-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            height: 3px;
+            background: var(--accent);
+            z-index: 9999;
+            transition: width 0.3s ease;
+            width: 0%;
+        }
+
+        /* ===========================================
+           NAV DOTS
+           =========================================== */
+        .nav-dots {
+            position: fixed;
+            right: clamp(0.5rem, 1.5vw, 1.5rem);
+            top: 50%;
+            transform: translateY(-50%);
+            display: flex;
+            flex-direction: column;
+            gap: clamp(4px, 0.6vw, 8px);
+            z-index: 100;
+        }
+
+        .nav-dot {
+            width: clamp(6px, 0.5vw, 8px);
+            height: clamp(6px, 0.5vw, 8px);
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.2);
+            cursor: pointer;
+            transition: all 0.3s ease;
+            border: none;
+        }
+
+        .nav-dot.active {
+            background: var(--accent);
+            transform: scale(1.4);
+        }
+
+        /* ===========================================
+           ANIMATIONS
+           =========================================== */
+        .reveal {
+            opacity: 0;
+            transform: translateY(25px);
+            transition: opacity var(--duration-normal) var(--ease-out-expo),
+                transform var(--duration-normal) var(--ease-out-expo);
+        }
+
+        .slide.visible .reveal {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .reveal:nth-child(1) {
+            transition-delay: 0.05s;
+        }
+
+        .reveal:nth-child(2) {
+            transition-delay: 0.15s;
+        }
+
+        .reveal:nth-child(3) {
+            transition-delay: 0.25s;
+        }
+
+        .reveal:nth-child(4) {
+            transition-delay: 0.35s;
+        }
+
+        .reveal:nth-child(5) {
+            transition-delay: 0.45s;
+        }
+
+        /* Number counter animation */
+        @keyframes countUp {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .slide.visible .stat-value {
+            animation: countUp 0.8s var(--ease-out-expo) forwards;
+        }
+
+        /* Slide-specific title card entrance */
+        .title-slide .accent-card {
+            opacity: 0;
+            transform: translateY(40px) scale(0.95);
+            transition: opacity 0.8s var(--ease-out-expo),
+                transform 0.8s var(--ease-out-expo);
+            transition-delay: 0.2s;
+        }
+
+        .title-slide.visible .accent-card {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+        }
+
+        /* ===========================================
+           TITLE SLIDE
+           =========================================== */
+        .title-slide .slide-content {
+            justify-content: flex-end;
+            padding-bottom: clamp(3rem, 8vh, 8rem);
+        }
+
+        .title-meta {
+            font-size: var(--small-size);
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            margin-bottom: clamp(0.5rem, 1.5vw, 1.5rem);
+        }
+
+        /* ===========================================
+           CLOSING SLIDE
+           =========================================== */
+        .closing-slide .slide-content {
+            align-items: center;
+            text-align: center;
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- Progress bar -->
+    <div class="progress-bar" id="progressBar"></div>
+
+    <!-- Navigation dots -->
+    <nav class="nav-dots" id="navDots"></nav>
+
+
+    <!-- ============================================
+         SLIDE 01 — TITLE
+         ============================================ -->
+    <section class="slide title-slide grid-overlay" id="slide-0">
+        <div class="section-number">DATATHON 2026</div>
+        <div class="slide-content">
+            <div class="title-meta reveal">Offshore Wind Energy Siting</div>
+            <div class="accent-card reveal">
+                <h2 style="font-size: var(--h2-size); margin-bottom: clamp(0.3rem, 0.8vw, 0.8rem);">Anti-Correlated
+                    Sub-Cluster Portfolio Optimization for Offshore Wind</h2>
+                <p style="font-size: var(--body-size); opacity: 0.85;">Finding regions where geographic diversification
+                    maximally stabilizes wind power output across seasons</p>
+            </div>
+        </div>
+    </section>
+
+
+    <!-- ============================================
+         SLIDE 02 — PROBLEM STATEMENT
+         ============================================ -->
+    <section class="slide grid-overlay" id="slide-1">
+        <div class="section-number">01 &mdash; PROBLEM</div>
+        <div class="slide-content">
+            <h2 class="reveal">The Intermittency Problem</h2>
+            <p class="subtitle reveal">Wind power output varies dramatically by season and location. A single site can
+                swing 3&times; between peak and trough months.</p>
+
+            <ul class="content-list reveal">
+                <li>Offshore wind is the highest-density renewable resource in the U.S., but <strong
+                        style="color: var(--text-primary);">seasonal variance</strong> makes grid integration expensive
+                </li>
+                <li class="blue">Industry picks sites by <strong style="color: var(--text-primary);">mean wind speed
+                        alone</strong> &mdash; ignoring the portfolio effect of geographic spread</li>
+                <li class="gold">Can we find clusters of sites whose seasonal output profiles are <strong
+                        style="color: var(--text-primary);">anti-correlated</strong>, reducing aggregate variance?</li>
+                <li style="opacity: 0.7; font-size: var(--small-size);"><em>Wind Power Density (WPD) =
+                        &frac12;&rho;v&sup3; &mdash; captures both wind speed and air density in a single metric
+                        (W/m&sup2;)</em></li>
+            </ul>
+
+            <div class="callout reveal">
+                <p><strong>Hypothesis:</strong> Within each U.S. coastal region, sub-clusters of sites exist with
+                    negatively correlated monthly wind power density profiles. A Markowitz-style portfolio allocation
+                    across these sub-clusters can reduce output variance by &gt;30% vs. the best single sub-cluster.</p>
+            </div>
+        </div>
+    </section>
+
+
+    <!-- ============================================
+         SLIDE 03 — DATASETS
+         ============================================ -->
+    <section class="slide grid-overlay" id="slide-2">
+        <div class="section-number">02 &mdash; DATA</div>
+        <div class="slide-content">
+            <h2 class="reveal">Datasets</h2>
+
+            <div class="two-col reveal">
+                <div>
+                    <div class="accent-card blue" style="margin-bottom: var(--element-gap);">
+                        <h3>ERA5 Reanalysis</h3>
+                        <p style="margin-top: 0.3rem;">ECMWF hourly data, full year 2025</p>
+                    </div>
+                    <ul class="content-list" style="margin-top: var(--element-gap);">
+                        <li class="blue">100m U/V wind vectors &rarr; wind speed &amp; WPD</li>
+                        <li class="blue">Surface pressure + 2m temperature &rarr; air density</li>
+                        <li class="blue">Significant wave height &amp; mean wave period</li>
+                        <li class="blue">0.25&deg; resolution, 20&ndash;80&deg;N, 160&ndash;60&deg;W</li>
+                    </ul>
+                </div>
+                <div>
+                    <div class="accent-card gold" style="margin-bottom: var(--element-gap);">
+                        <h3>GEBCO 2025 Bathymetry</h3>
+                        <p style="margin-top: 0.3rem;">General Bathymetric Chart of the Oceans</p>
+                    </div>
+                    <ul class="content-list" style="margin-top: var(--element-gap);">
+                        <li class="gold">Ocean depth at ~450m native resolution</li>
+                        <li class="gold">Seabed slope &amp; stability classification</li>
+                        <li class="gold">Foundation type mapping (monopile / jacket / floating)</li>
+                        <li class="gold">Land-sea mask for coastal distance</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </section>
+
+
+    <!-- ============================================
+         SLIDE 04 — PIPELINE
+         ============================================ -->
+    <section class="slide grid-overlay" id="slide-3">
+        <div class="section-number">03 &mdash; PIPELINE</div>
+        <div class="slide-content">
+            <h2 class="reveal">Data Cleaning &amp; Processing Pipeline</h2>
+
+            <div class="pipeline reveal">
+                <div class="pipeline-step">
+                    <div class="step-num">01</div>
+                    <div class="step-title">Bathymetry EDA</div>
+                    <div class="step-detail">GEBCO NetCDF &rarr; depth, slope, foundation type, US EEZ filter</div>
+                </div>
+                <div class="pipeline-arrow">&rarr;</div>
+                <div class="pipeline-step">
+                    <div class="step-num">02</div>
+                    <div class="step-title">ERA5 Wind Physics</div>
+                    <div class="step-detail">NetCDF &rarr; WPD, air density, wave stats, land-sea mask filter</div>
+                </div>
+                <div class="pipeline-arrow">&rarr;</div>
+                <div class="pipeline-step">
+                    <div class="step-num">03</div>
+                    <div class="step-title">Golden Zone Filter</div>
+                    <div class="step-detail">WPD &ge; 200 W/m&sup2;, depth 10&ndash;1000m, SWH p90 &lt; 5m, stable slope
+                    </div>
+                </div>
+                <div class="pipeline-arrow">&rarr;</div>
+                <div class="pipeline-step">
+                    <div class="step-num">04</div>
+                    <div class="step-title">Portfolio Optimization</div>
+                    <div class="step-detail">Subcluster &rarr; correlation &rarr; Markowitz min-variance</div>
+                </div>
+            </div>
+
+            <ul class="content-list reveal" style="margin-top: var(--content-gap);">
+                <li>ERA5 hourly data streamed per-month from 10 NetCDF files (~15 GB total), physics computed
+                    per-timestep</li>
+                <li class="blue">Land-sea mask applied to exclude all terrestrial grid cells (lsm &gt; 0.5)</li>
+                <li class="gold">Wave grid (0.5&deg;) interpolated to match surface grid (0.25&deg;) via linear
+                    interpolation</li>
+                <li>DuckDB spatial join snaps ERA5 and bathymetry grids, filters by industry-standard thresholds</li>
+            </ul>
+        </div>
+    </section>
+
+
+    <!-- ============================================
+         SLIDE 05 — EDA: BATHYMETRY
+         ============================================ -->
+    <section class="slide grid-overlay" id="slide-4">
+        <div class="section-number">04 &mdash; EDA</div>
+        <div class="slide-content">
+            <h2 class="reveal">Exploratory Analysis: Bathymetry</h2>
+            <p class="subtitle reveal">GEBCO 2025 ocean depth across the U.S. study area &mdash; deeper waters require
+                floating foundations</p>
+
+            <div class="single-image reveal">
+                <img src="outputs/plots/depth_heatmap.png"
+                    alt="Ocean bathymetry heatmap showing depth variations across U.S. coastal waters">
+            </div>
+        </div>
+    </section>
+
+
+    <!-- ============================================
+         SLIDE 05b — EDA: FOUNDATION TYPES
+         ============================================ -->
+    <section class="slide grid-overlay" id="slide-4b">
+        <div class="section-number">04 &mdash; EDA</div>
+        <div class="slide-content">
+            <h2 class="reveal">Foundation Type Distribution</h2>
+            <p class="subtitle reveal">Depth determines foundation technology &mdash; and cost. Most viable area
+                requires floating platforms.</p>
+
+            <div class="two-col reveal">
+                <div>
+                    <img src="outputs/plots/foundation_histogram.png"
+                        alt="Bar chart of ocean area by foundation type depth bin"
+                        style="max-height: min(45vh, 380px); border-radius: 8px; border: 1px solid var(--border-subtle);">
+                </div>
+                <div>
+                    <ul class="content-list">
+                        <li><strong style="color: var(--text-primary);">Monopile (0&ndash;15m):</strong> 0.17M km&sup2;
+                            &mdash; cheapest, but limited shallow shelf</li>
+                        <li class="blue"><strong style="color: var(--text-primary);">Jacket/Fixed
+                                (15&ndash;60m):</strong> 0.43M km&sup2; &mdash; proven technology, moderate cost</li>
+                        <li class="gold"><strong style="color: var(--text-primary);">Floating (60&ndash;300m):</strong>
+                            0.56M km&sup2; &mdash; emerging tech, unlocks vast deep-water resource</li>
+                        <li><strong style="color: var(--text-primary);">Infeasible (&gt;300m):</strong> 4.29M km&sup2;
+                            &mdash; too deep for current technology</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </section>
+
+
+    <!-- ============================================
+         SLIDE 06 — EDA: WIND POWER DENSITY
+         ============================================ -->
+    <section class="slide grid-overlay" id="slide-5">
+        <div class="section-number">04 &mdash; EDA</div>
+        <div class="slide-content">
+            <h2 class="reveal">Wind Power Density at 100m</h2>
+            <p class="subtitle reveal">Annual mean WPD from ERA5 2025 &mdash; highest densities in the North Atlantic
+                and Alaskan waters</p>
+
+            <div class="single-image reveal">
+                <img src="outputs/plots/wpd_heatmap.png" alt="Wind power density heatmap across study area">
+            </div>
+        </div>
+    </section>
+
+
+    <!-- ============================================
+         SLIDE 07 — EDA: GOLDEN ZONES
+         ============================================ -->
+    <section class="slide grid-overlay" id="slide-6">
+        <div class="section-number">04 &mdash; EDA</div>
+        <div class="slide-content">
+            <h2 class="reveal">Golden Zones: Viable Sites</h2>
+            <p class="subtitle reveal">Sites passing all physical filters: sufficient wind, safe waves, suitable depth,
+                stable seabed</p>
+
+            <div class="single-image reveal">
+                <img src="outputs/plots/golden_zones.png" alt="Golden zone offshore wind sites around the U.S.">
+            </div>
+        </div>
+    </section>
+
+
+    <!-- ============================================
+         SLIDE 08 — MODEL DESIGN
+         ============================================ -->
+    <section class="slide grid-overlay" id="slide-7">
+        <div class="section-number">05 &mdash; METHOD</div>
+        <div class="slide-content">
+            <h2 class="reveal">Model Design: Sub-Cluster Portfolio Optimization</h2>
+
+            <ul class="content-list reveal">
+                <li><strong style="color: var(--text-primary);">Region Assignment:</strong> Golden-zone cells assigned
+                    to 6 U.S. coastal regions (Alaska, Pacific, Gulf, Southeast, Mid-Atlantic, New England)</li>
+                <li class="blue"><strong style="color: var(--text-primary);">Monthly WPD Extraction:</strong> For each
+                    cell, extract 12-month WPD time series via DuckDB spatial join across all monthly parquets</li>
+                <li class="gold"><strong style="color: var(--text-primary);">Correlation-Based Subclustering:</strong>
+                    Hierarchical clustering on pairwise correlation distance (d = 1 &minus; &rho;) with Ward linkage
+                    &rarr; 3 sub-clusters per region</li>
+                <li><strong style="color: var(--text-primary);">Markowitz Optimization:</strong> Mean-variance portfolio
+                    across sub-cluster monthly profiles, long-only weights summing to 1</li>
+            </ul>
+
+            <div class="callout blue reveal">
+                <p><strong>Key insight:</strong> We treat sub-clusters as "assets" with monthly WPD as "returns."
+                    Anti-correlated sub-clusters provide natural hedging &mdash; when one area has low wind, another has
+                    high wind.</p>
+            </div>
+        </div>
+    </section>
+
+
+    <!-- ============================================
+         SLIDE 08b — ALL CLUSTERS OVERVIEW MAP
+         ============================================ -->
+    <section class="slide grid-overlay" id="slide-7b">
+        <div class="section-number">06 &mdash; RESULTS</div>
+        <div class="slide-content">
+            <h2 class="reveal">Six Regions, Optimized Independently</h2>
+            <p class="subtitle reveal">Marker size &amp; opacity reflect optimal portfolio weight. Bold borders indicate
+                selected sub-clusters.</p>
+
+            <div class="single-image reveal">
+                <img src="outputs/plots/cluster_maps_optimal.png"
+                    alt="Six-panel map showing optimal subcluster allocations for all U.S. coastal regions"
+                    style="max-height: min(58vh, 460px);">
+            </div>
+        </div>
+    </section>
+
+
+    <!-- ============================================
+         SLIDE 09 — PACIFIC RESULT (Hero finding)
+         ============================================ -->
+    <section class="slide grid-overlay" id="slide-8">
+        <div class="section-number">06 &mdash; RESULTS</div>
+        <div class="slide-content">
+            <h2 class="reveal"><span class="accent-text">Pacific Coast:</span> The Standout Region</h2>
+
+            <div class="stats-row reveal">
+                <div class="stat-block">
+                    <div class="stat-value accent-text">70.6%</div>
+                    <div class="stat-label">Variance Reduction</div>
+                </div>
+                <div class="stat-block">
+                    <div class="stat-value blue-text">&minus;0.30</div>
+                    <div class="stat-label">Min Correlation (&rho;)</div>
+                </div>
+                <div class="stat-block">
+                    <div class="stat-value gold-text">590</div>
+                    <div class="stat-label">Portfolio WPD (W/m&sup2;)</div>
+                </div>
+            </div>
+
+            <div class="two-col reveal">
+                <div>
+                    <img src="outputs/plots/pacific_corr_matrix.png"
+                        alt="Pacific sub-cluster correlation matrix showing anti-correlation"
+                        style="max-height: min(38vh, 320px); border-radius: 8px; border: 1px solid var(--border-subtle);">
+                </div>
+                <div>
+                    <img src="outputs/plots/pacific_seasonal.png"
+                        alt="Pacific monthly WPD profiles showing opposing seasonal patterns"
+                        style="max-height: min(38vh, 320px); border-radius: 8px; border: 1px solid var(--border-subtle);">
+                </div>
+            </div>
+        </div>
+    </section>
+
+
+    <!-- ============================================
+         SLIDE 10 — PACIFIC DETAIL
+         ============================================ -->
+    <section class="slide grid-overlay" id="slide-9">
+        <div class="section-number">06 &mdash; RESULTS</div>
+        <div class="slide-content">
+            <h2 class="reveal">Pacific Portfolio: Geographic Allocation</h2>
+            <p class="subtitle reveal">Optimal weights: Pacific NW 55.6% &bull; N. California 10.4% &bull; S. California
+                33.9%</p>
+
+            <div class="two-col reveal">
+                <div>
+                    <img src="outputs/plots/pacific_portfolio_map.png"
+                        alt="Map showing optimal portfolio allocation along Pacific coast"
+                        style="max-height: min(52vh, 420px); border-radius: 8px; border: 1px solid var(--border-subtle);">
+                </div>
+                <div>
+                    <img src="outputs/plots/pacific_frontier.png"
+                        alt="Pacific efficient frontier showing min-variance portfolio"
+                        style="max-height: min(52vh, 420px); border-radius: 8px; border: 1px solid var(--border-subtle);">
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============================================
+         SLIDE 11 — CROSS-REGION COMPARISON
+         ============================================ -->
+    <section class="slide grid-overlay" id="slide-10">
+        <div class="section-number">06 &mdash; RESULTS</div>
+        <p style="margin-bottom:30px"></p>
+        <div class="slide-content">
+            <h2 class="reveal">All Regions: Diversification Benefit</h2>
+
+            <div class="single-image reveal">
+                <img src="outputs/plots/cluster_summary.png"
+                    alt="Bar chart comparing variance reduction and minimum correlation across all 6 regions"
+                    style="max-height: min(40vh, 340px);">
+            </div>
+
+            <table class="data-table reveal">
+                <thead>
+                    <tr>
+                        <th>Region</th>
+                        <th>Variance Reduction</th>
+                        <th>Min &rho;</th>
+                        <th>Portfolio WPD</th>
+                        <th>Portfolio &sigma;</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr class="highlight">
+                        <td>Pacific</td>
+                        <td><strong>70.6%</strong></td>
+                        <td><strong>&minus;0.30</strong></td>
+                        <td>590 W/m&sup2;</td>
+                        <td>120 W/m&sup2;</td>
+                    </tr>
+                    <tr>
+                        <td>Gulf of Mexico</td>
+                        <td>46.2%</td>
+                        <td>0.82</td>
+                        <td>215 W/m&sup2;</td>
+                        <td>118 W/m&sup2;</td>
+                    </tr>
+                    <tr>
+                        <td>Southeast</td>
+                        <td>41.9%</td>
+                        <td>0.86</td>
+                        <td>287 W/m&sup2;</td>
+                        <td>142 W/m&sup2;</td>
+                    </tr>
+                    <tr>
+                        <td>Mid-Atlantic</td>
+                        <td>40.6%</td>
+                        <td>0.95</td>
+                        <td>706 W/m&sup2;</td>
+                        <td>332 W/m&sup2;</td>
+                    </tr>
+                    <tr>
+                        <td>Alaska</td>
+                        <td>33.9%</td>
+                        <td>0.33</td>
+                        <td>780 W/m&sup2;</td>
+                        <td>327 W/m&sup2;</td>
+                    </tr>
+                    <tr>
+                        <td>New England</td>
+                        <td>30.4%</td>
+                        <td>0.98</td>
+                        <td>729 W/m&sup2;</td>
+                        <td>321 W/m&sup2;</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+
+    <!-- ============================================
+         SLIDE 12 — INTERPRETATION
+         ============================================ -->
+    <section class="slide grid-overlay" id="slide-11">
+        <div class="section-number">07 &mdash; INTERPRETATION</div>
+        <div class="slide-content">
+            <h2 class="reveal">Why the Pacific is Unique</h2>
+
+            <div class="accent-card reveal" style="margin-bottom: var(--content-gap);">
+                <h3>The only region with genuinely anti-correlated sub-clusters (&rho; = &minus;0.30)</h3>
+                <p style="margin-top: 0.3rem;">All other regions have minimum sub-cluster correlations above +0.33,
+                    meaning their seasonal profiles move together. The Pacific's sub-clusters actively
+                    <strong>offset</strong> each other.
+                </p>
+            </div>
+
+            <ul class="content-list reveal">
+                <li><strong style="color: var(--text-primary);">Pacific NW (WA/OR):</strong> Dominant winter-peak
+                    pattern driven by North Pacific storm track</li>
+                <li class="blue"><strong style="color: var(--text-primary);">N. California:</strong> Transition zone
+                    with summer-peak from thermal low pressure &mdash; opposite seasonal phase</li>
+                <li class="gold"><strong style="color: var(--text-primary);">S. California:</strong> Moderate year-round
+                    profile, low variance &mdash; acts as portfolio stabilizer</li>
+                <li><strong style="color: var(--text-primary);">Result:</strong> Allocating 55.6% PNW + 10.4% NorCal +
+                    33.9% SoCal cuts output variance by 70.6%</li>
+            </ul>
+
+            <div class="callout reveal" style="margin-top: var(--element-gap);">
+                <p><strong>Business impact:</strong> 70.6% variance reduction &rarr; more predictable revenue streams
+                    &rarr; lower cost of capital for project financing. In offshore wind, reducing output uncertainty by
+                    even 10% can lower the weighted average cost of capital by 50&ndash;100 bps &mdash; worth hundreds
+                    of millions over a project's 25-year life.</p>
+            </div>
+        </div>
+    </section>
+
+
+    <!-- ============================================
+         SLIDE 13 — LIMITATIONS & NEXT STEPS
+         ============================================ -->
+    <section class="slide grid-overlay" id="slide-12">
+        <div class="section-number">08 &mdash; NEXT STEPS</div>
+        <div class="slide-content">
+            <h2 class="reveal">Limitations &amp; Next Steps</h2>
+
+            <div class="two-col reveal">
+                <div>
+                    <h3 style="color: var(--accent); margin-bottom: var(--element-gap);">Limitations</h3>
+                    <ul class="content-list">
+                        <li>Single year of data (2025) &mdash; multi-year analysis needed for climate robustness</li>
+                        <li>Monthly temporal resolution loses intra-day and weekly variance patterns</li>
+                        <li>No transmission infrastructure, grid connection costs, or permitting constraints</li>
+                        <li>Uniform 3-subcluster count &mdash; optimal K may vary by region</li>
+                    </ul>
+                </div>
+                <div>
+                    <h3 style="color: var(--accent-blue); margin-bottom: var(--element-gap);">Next Steps</h3>
+                    <ul class="content-list">
+                        <li class="blue">Extend to 10+ year ERA5 archive for out-of-sample validation</li>
+                        <li class="blue">Hourly portfolio optimization to capture diurnal anti-correlation</li>
+                        <li class="blue">Add LCOE (levelized cost) as a constraint to the portfolio model</li>
+                        <li class="blue">Cross-region portfolio: combine Pacific + Alaska for continental-scale hedging
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="callout reveal" style="margin-top: var(--content-gap);">
+                <p><strong>Core takeaway:</strong> Geographic diversification within a single wind region can reduce
+                    output variance by up to 70% &mdash; a fundamentally different approach to wind farm siting that
+                    borrows from financial portfolio theory.</p>
+            </div>
+        </div>
+    </section>
+
+
+    <!-- ============================================
+         SLIDE 14 — CLOSING
+         ============================================ -->
+    <section class="slide closing-slide grid-overlay" id="slide-13">
+        <div class="slide-content">
+            <h1 class="reveal" style="margin-bottom: var(--content-gap);">Thank You</h1>
+            <div class="accent-card reveal" style="text-align: center; max-width: min(80vw, 500px);">
+                <h3>Team</h3>
+                <p style="margin-top: 0.3rem;">Sidharth Swamy &bull; Muzammil Cheema</p>
+            </div>
+            <div class="reveal"
+                style="text-align: center; margin-top: var(--content-gap); max-width: min(80vw, 500px);">
+                <p style="font-size: var(--small-size); color: var(--text-secondary);">
+                    <strong style="color: var(--text-primary);">Stack:</strong> Python &bull; xarray &bull; DuckDB
+                    &bull; SciPy &bull; scikit-learn &bull; Matplotlib<br>
+                    <strong style="color: var(--text-primary);">Data:</strong> ERA5 (ECMWF) &bull; GEBCO 2025 &bull;
+                    Markowitz Mean-Variance
+                </p>
+            </div>
+        </div>
+    </section>
+
+
+    <!-- ===========================================
+         SLIDE PRESENTATION CONTROLLER
+         =========================================== -->
+    <script>
+        class SlidePresentation {
+            constructor() {
+                this.slides = document.querySelectorAll('.slide');
+                this.currentSlide = 0;
+                this.setupIntersectionObserver();
+                this.setupKeyboardNav();
+                this.setupTouchNav();
+                this.setupProgressBar();
+                this.setupNavDots();
+            }
+
+            setupIntersectionObserver() {
+                const observer = new IntersectionObserver((entries) => {
+                    entries.forEach(entry => {
+                        if (entry.isIntersecting) {
+                            entry.target.classList.add('visible');
+                            const idx = Array.from(this.slides).indexOf(entry.target);
+                            this.currentSlide = idx;
+                            this.updateProgressBar();
+                            this.updateNavDots();
+                        }
+                    });
+                }, { threshold: 0.5 });
+
+                this.slides.forEach(slide => observer.observe(slide));
+            }
+
+            setupKeyboardNav() {
+                document.addEventListener('keydown', (e) => {
+                    if (e.key === 'ArrowDown' || e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') {
+                        e.preventDefault();
+                        this.goToSlide(this.currentSlide + 1);
+                    } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft' || e.key === 'PageUp') {
+                        e.preventDefault();
+                        this.goToSlide(this.currentSlide - 1);
+                    } else if (e.key === 'Home') {
+                        e.preventDefault();
+                        this.goToSlide(0);
+                    } else if (e.key === 'End') {
+                        e.preventDefault();
+                        this.goToSlide(this.slides.length - 1);
+                    }
+                });
+            }
+
+            setupTouchNav() {
+                let startY = 0;
+                document.addEventListener('touchstart', (e) => { startY = e.touches[0].clientY; });
+                document.addEventListener('touchend', (e) => {
+                    const diff = startY - e.changedTouches[0].clientY;
+                    if (Math.abs(diff) > 50) {
+                        this.goToSlide(this.currentSlide + (diff > 0 ? 1 : -1));
+                    }
+                });
+            }
+
+            setupProgressBar() {
+                this.progressBar = document.getElementById('progressBar');
+                this.updateProgressBar();
+            }
+
+            updateProgressBar() {
+                const progress = ((this.currentSlide + 1) / this.slides.length) * 100;
+                this.progressBar.style.width = progress + '%';
+            }
+
+            setupNavDots() {
+                const nav = document.getElementById('navDots');
+                this.slides.forEach((_, i) => {
+                    const dot = document.createElement('button');
+                    dot.className = 'nav-dot' + (i === 0 ? ' active' : '');
+                    dot.setAttribute('aria-label', `Go to slide ${i + 1}`);
+                    dot.addEventListener('click', () => this.goToSlide(i));
+                    nav.appendChild(dot);
+                });
+                this.dots = nav.querySelectorAll('.nav-dot');
+            }
+
+            updateNavDots() {
+                this.dots.forEach((dot, i) => {
+                    dot.classList.toggle('active', i === this.currentSlide);
+                });
+            }
+
+            goToSlide(index) {
+                if (index < 0 || index >= this.slides.length) return;
+                this.slides[index].scrollIntoView({ behavior: 'smooth' });
+            }
+        }
+
+        new SlidePresentation();
+    </script>
+
+</body>
+
+</html>
