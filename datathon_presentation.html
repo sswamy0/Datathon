@@ -647,6 +647,58 @@
             align-items: center;
             text-align: center;
         }
+
+        /* ===========================================
+           INTERACTIVE MAP SLIDE
+           =========================================== */
+        .map-slide {
+            /* Override scroll-snap so the iframe can receive all events */
+            scroll-snap-align: start;
+        }
+
+        .map-slide .slide-content {
+            padding: 0;
+            position: relative;
+            overflow: visible;
+        }
+
+        .map-slide .map-header {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 10;
+            padding: clamp(0.6rem, 1.5vw, 1.2rem) var(--slide-padding);
+            background: linear-gradient(to bottom, rgba(14,17,23,0.95) 0%, rgba(14,17,23,0.6) 80%, transparent 100%);
+            pointer-events: none;
+        }
+
+        .map-slide .map-header h2,
+        .map-slide .map-header p { pointer-events: auto; }
+
+        .map-slide iframe {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border: none;
+            display: block;
+        }
+
+        /* ===========================================
+           BOEM VALIDATION TABLE
+           =========================================== */
+        .boem-tag {
+            display: inline-block;
+            padding: clamp(1px, 0.2vw, 2px) clamp(4px, 0.6vw, 8px);
+            border-radius: 4px;
+            font-size: clamp(0.55rem, 0.7vw, 0.7rem);
+            font-weight: 600;
+            line-height: 1.4;
+        }
+        .boem-tag.match { background: rgba(0,200,83,0.15); color: #00C853; }
+        .boem-tag.partial { background: rgba(255,179,0,0.15); color: #FFB300; }
     </style>
 </head>
 
@@ -1060,6 +1112,106 @@
                     </tr>
                 </tbody>
             </table>
+        </div>
+    </section>
+
+
+    <!-- ============================================
+         SLIDE 11b — INTERACTIVE MAP
+         ============================================ -->
+    <section class="slide map-slide" id="slide-10b">
+        <div class="slide-content">
+            <div class="map-header">
+                <h2 class="reveal" style="font-size: var(--h3-size);">Interactive Portfolio Map</h2>
+                <p class="reveal subtitle" style="margin-top: 0.2rem; font-size: var(--small-size);">Click regions to explore sub-clusters &bull; Hover cells for detail &bull; Gold dashed lines = BOEM lease areas</p>
+            </div>
+            <iframe src="interactive_map.html" title="Interactive offshore wind portfolio map" loading="lazy"></iframe>
+        </div>
+    </section>
+
+
+    <!-- ============================================
+         SLIDE 11c — BOEM LEASE VALIDATION
+         ============================================ -->
+    <section class="slide grid-overlay" id="slide-10c">
+        <div class="section-number">06 &mdash; RESULTS</div>
+        <div class="slide-content">
+            <h2 class="reveal">Validation: BOEM Wind Lease Areas</h2>
+            <p class="subtitle reveal">All 8 active BOEM lease / Wind Energy Areas fall within our golden-zone cells, confirming our siting methodology</p>
+
+            <table class="data-table reveal">
+                <thead>
+                    <tr>
+                        <th>BOEM Lease Area</th>
+                        <th>Our Region</th>
+                        <th>Sub-cluster</th>
+                        <th>Mean WPD</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Humboldt WEA</td>
+                        <td>Pacific</td>
+                        <td>SC-0 (Pacific NW)</td>
+                        <td>652 W/m&sup2;</td>
+                        <td><span class="boem-tag match">In Golden Zone</span></td>
+                    </tr>
+                    <tr>
+                        <td>Morro Bay WEA</td>
+                        <td>Pacific</td>
+                        <td>SC-2 (S. California)</td>
+                        <td>433 W/m&sup2;</td>
+                        <td><span class="boem-tag match">In Golden Zone</span></td>
+                    </tr>
+                    <tr>
+                        <td>Brookings OR</td>
+                        <td>Pacific</td>
+                        <td>SC-1 (N. California)</td>
+                        <td>1,002 W/m&sup2;</td>
+                        <td><span class="boem-tag match">In Golden Zone</span></td>
+                    </tr>
+                    <tr>
+                        <td>NY Bight</td>
+                        <td>Mid-Atlantic</td>
+                        <td>SC-0 (Nearshore)</td>
+                        <td>726 W/m&sup2;</td>
+                        <td><span class="boem-tag match">In Golden Zone</span></td>
+                    </tr>
+                    <tr>
+                        <td>Vineyard Wind</td>
+                        <td>Mid-Atlantic</td>
+                        <td>SC-2 (Mid-Shelf)</td>
+                        <td>917 W/m&sup2;</td>
+                        <td><span class="boem-tag match">In Golden Zone</span></td>
+                    </tr>
+                    <tr>
+                        <td>Gulf of Maine</td>
+                        <td>New England</td>
+                        <td>SC-0</td>
+                        <td>800 W/m&sup2;</td>
+                        <td><span class="boem-tag match">In Golden Zone</span></td>
+                    </tr>
+                    <tr>
+                        <td>Kitty Hawk</td>
+                        <td>Southeast</td>
+                        <td>SC-0 (Cape Hatteras)</td>
+                        <td>532 W/m&sup2;</td>
+                        <td><span class="boem-tag match">In Golden Zone</span></td>
+                    </tr>
+                    <tr>
+                        <td>GOM Lake Charles</td>
+                        <td>Gulf of Mexico</td>
+                        <td>SC-2 (Western Gulf)</td>
+                        <td>339 W/m&sup2;</td>
+                        <td><span class="boem-tag match">In Golden Zone</span></td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="callout reveal" style="margin-top: var(--element-gap);">
+                <p><strong>8 / 8 BOEM lease areas confirmed.</strong> Every active federal wind energy area falls within our independently-derived golden zones &mdash; validating our multi-criteria siting approach. Pacific leases (Humboldt, Morro Bay, Brookings) span all 3 sub-clusters, supporting our diversification thesis.</p>
+            </div>
         </div>
     </section>
 

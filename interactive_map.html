@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Offshore Wind Portfolio — Interactive Map</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://d3js.org/topojson.v3.min.js"></script>
+    <script src="data/states-10m.js"></script>
+    <script src="data/map_data.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Space Grotesk', sans-serif;
+            background: #0e1117;
+            color: #f0f0f0;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        .app {
+            display: grid;
+            grid-template-columns: 1fr 380px;
+            grid-template-rows: auto 1fr;
+            height: 100vh;
+        }
+
+        /* Header */
+        .header {
+            grid-column: 1 / -1;
+            padding: 12px 24px;
+            background: rgba(255,255,255,0.03);
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .header h1 {
+            font-size: 1.1rem;
+            font-weight: 700;
+            letter-spacing: -0.01em;
+        }
+        .header .subtitle {
+            font-size: 0.8rem;
+            color: #8892a4;
+        }
+
+        /* Map container */
+        .map-container {
+            position: relative;
+            overflow: hidden;
+        }
+        .map-container svg {
+            width: 100%;
+            height: 100%;
+        }
+        .state { fill: #1a1e2e; stroke: #333; stroke-width: 0.5px; }
+        .cell { cursor: pointer; transition: opacity 0.2s; }
+        .cell:hover { stroke: #fff; stroke-width: 2px; }
+
+        /* BOEM lease areas */
+        .boem-lease {
+            fill: none;
+            stroke: #FFB300;
+            stroke-width: 2px;
+            stroke-dasharray: 6 3;
+            pointer-events: none;
+        }
+        .boem-label {
+            font-size: 10px;
+            fill: #FFB300;
+            font-weight: 600;
+            pointer-events: none;
+        }
+
+        /* Region buttons */
+        .region-buttons {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            z-index: 10;
+        }
+        .region-btn {
+            background: rgba(14,17,23,0.85);
+            border: 1px solid rgba(255,255,255,0.15);
+            color: #f0f0f0;
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-family: inherit;
+            font-size: 0.75rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-align: left;
+        }
+        .region-btn:hover, .region-btn.active {
+            background: rgba(255,87,34,0.2);
+            border-color: #FF5722;
+        }
+        .region-btn .var-tag {
+            font-size: 0.65rem;
+            color: #8892a4;
+            margin-left: 6px;
+        }
+        .region-btn.active .var-tag { color: #FF5722; }
+
+        /* Sidebar */
+        .sidebar {
+            background: rgba(255,255,255,0.02);
+            border-left: 1px solid rgba(255,255,255,0.06);
+            padding: 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .sidebar h2 {
+            font-size: 1rem;
+            font-weight: 700;
+            color: #FF5722;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .sidebar h3 {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: #f0f0f0;
+            margin-bottom: 8px;
+        }
+
+        /* Stats */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 12px;
+        }
+        .stat {
+            text-align: center;
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 12px 8px;
+        }
+        .stat-value {
+            font-size: 1.4rem;
+            font-weight: 700;
+            line-height: 1;
+        }
+        .stat-label {
+            font-size: 0.65rem;
+            color: #8892a4;
+            margin-top: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .stat-value.orange { color: #FF5722; }
+        .stat-value.blue { color: #00B8D4; }
+        .stat-value.gold { color: #FFB300; }
+
+        /* Chart */
+        .chart-container {
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 16px;
+        }
+        .chart-container svg { width: 100%; }
+
+        /* Subcluster legend */
+        .sc-legend {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .sc-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 12px;
+            border-radius: 6px;
+            background: rgba(255,255,255,0.03);
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .sc-item:hover { background: rgba(255,255,255,0.06); }
+        .sc-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .sc-info { flex: 1; }
+        .sc-name { font-size: 0.8rem; font-weight: 600; }
+        .sc-detail { font-size: 0.7rem; color: #8892a4; }
+        .sc-weight {
+            font-size: 0.85rem;
+            font-weight: 700;
+            min-width: 45px;
+            text-align: right;
+        }
+
+        /* Tooltip */
+        .tooltip {
+            position: absolute;
+            background: rgba(14,17,23,0.95);
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 8px;
+            padding: 12px 16px;
+            font-size: 0.75rem;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.15s;
+            z-index: 100;
+            max-width: 220px;
+        }
+        .tooltip.visible { opacity: 1; }
+        .tooltip .tt-title { font-weight: 700; margin-bottom: 4px; }
+        .tooltip .tt-row { display: flex; justify-content: space-between; gap: 12px; color: #8892a4; }
+        .tooltip .tt-val { color: #f0f0f0; font-weight: 600; }
+
+        /* BOEM legend */
+        .boem-legend {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            background: rgba(255,179,0,0.08);
+            border: 1px dashed rgba(255,179,0,0.4);
+            border-radius: 6px;
+            font-size: 0.75rem;
+            color: #FFB300;
+        }
+        .boem-legend-line {
+            width: 24px;
+            height: 2px;
+            background: #FFB300;
+            flex-shrink: 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <div class="header">
+            <div>
+                <h1>Offshore Wind Portfolio Optimization</h1>
+                <div class="subtitle">Intra-cluster sub-cluster analysis · ERA5 2025 + GEBCO 2025</div>
+            </div>
+            <div class="subtitle">Click a region to explore · Hover cells for detail</div>
+        </div>
+
+        <div class="map-container" id="mapContainer">
+            <div class="region-buttons" id="regionButtons"></div>
+            <div class="tooltip" id="tooltip"></div>
+        </div>
+
+        <div class="sidebar" id="sidebar">
+            <div>
+                <h2 id="regionTitle">Select a Region</h2>
+                <p style="font-size: 0.8rem; color: #8892a4; margin-top: 4px;" id="regionSubtitle">
+                    Click a region on the map or use the buttons to explore sub-cluster portfolios.
+                </p>
+            </div>
+            <div class="stats-grid" id="statsGrid" style="display: none;">
+                <div class="stat"><div class="stat-value orange" id="statVarRed">—</div><div class="stat-label">Var. Reduction</div></div>
+                <div class="stat"><div class="stat-value blue" id="statMinCorr">—</div><div class="stat-label">Min ρ</div></div>
+                <div class="stat"><div class="stat-value gold" id="statCells">—</div><div class="stat-label">Cells</div></div>
+            </div>
+            <div id="scLegend"></div>
+            <div class="chart-container" id="chartContainer" style="display: none;">
+                <h3>Monthly WPD by Sub-Cluster</h3>
+                <svg id="seasonalChart" height="200"></svg>
+            </div>
+            <div class="boem-legend" id="boemLegendBox" style="display: none;">
+                <div class="boem-legend-line"></div>
+                <span>BOEM Lease / Wind Energy Area</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    // ── BOEM Lease Areas (approximate bounding polygons) ──
+    const BOEM_LEASES = [
+        { name: "Humboldt WEA", coords: [[-124.8,41.0],[-124.8,40.6],[-124.4,40.6],[-124.4,41.0],[-124.8,41.0]] },
+        { name: "Morro Bay WEA", coords: [[-121.6,35.6],[-121.6,35.1],[-121.1,35.1],[-121.1,35.6],[-121.6,35.6]] },
+        { name: "Brookings OR", coords: [[-124.8,42.3],[-124.8,42.0],[-124.4,42.0],[-124.4,42.3],[-124.8,42.3]] },
+        { name: "NY Bight", coords: [[-73.8,40.3],[-73.8,39.7],[-73.0,39.7],[-73.0,40.3],[-73.8,40.3]] },
+        { name: "Vineyard Wind", coords: [[-70.8,41.2],[-70.8,40.8],[-70.2,40.8],[-70.2,41.2],[-70.8,41.2]] },
+        { name: "Gulf of Maine", coords: [[-69.5,43.8],[-69.5,43.3],[-68.5,43.3],[-68.5,43.8],[-69.5,43.8]] },
+        { name: "Kitty Hawk", coords: [[-75.8,36.5],[-75.8,36.0],[-75.3,36.0],[-75.3,36.5],[-75.8,36.5]] },
+        { name: "GOM Lake Charles", coords: [[-93.5,29.0],[-93.5,28.5],[-92.5,28.5],[-92.5,29.0],[-93.5,29.0]] },
+    ];
+
+    const SC_COLORS = ["#e41a1c", "#377eb8", "#4daf4a"];
+    const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+    const REGION_MIN_CORR = {
+        "Pacific": -0.30, "Alaska": 0.33, "Gulf of Mexico": 0.83,
+        "Southeast": 0.86, "Mid-Atlantic": 0.95, "New England": 0.98
+    };
+
+    let mapData = null;
+    let currentRegion = null;
+    let projection, path, svg, g;
+
+    // ── Load data and initialize ──
+    function init() {
+        const us = US_ATLAS;
+        mapData = MAP_DATA;
+
+        const container = document.getElementById("mapContainer");
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+
+        svg = d3.select("#mapContainer").append("svg")
+            .attr("width", w).attr("height", h);
+
+        projection = d3.geoAlbersUsa().fitSize([w, h], topojson.feature(us, us.objects.states));
+        path = d3.geoPath().projection(projection);
+
+        g = svg.append("g");
+
+        // Draw states
+        g.selectAll(".state")
+            .data(topojson.feature(us, us.objects.states).features)
+            .join("path")
+            .attr("class", "state")
+            .attr("d", path);
+
+        // Draw BOEM leases
+        const boemG = g.append("g").attr("class", "boem-leases");
+        BOEM_LEASES.forEach(lease => {
+            const projected = lease.coords.map(c => projection(c)).filter(p => p != null);
+            if (projected.length > 2) {
+                boemG.append("polygon")
+                    .attr("class", "boem-lease")
+                    .attr("points", projected.map(p => p.join(",")).join(" "));
+                const cx = d3.mean(projected, p => p[0]);
+                const cy = d3.min(projected, p => p[1]) - 6;
+                if (cx && cy) {
+                    boemG.append("text")
+                        .attr("class", "boem-label")
+                        .attr("x", cx).attr("y", cy)
+                        .attr("text-anchor", "middle")
+                        .text(lease.name);
+                }
+            }
+        });
+
+        // Draw cells (initially all)
+        drawCells(mapData.cells);
+
+        // Region buttons
+        const btnContainer = document.getElementById("regionButtons");
+        const regions = Object.keys(mapData.regions);
+        regions.sort((a, b) => mapData.regions[b].var_reduction - mapData.regions[a].var_reduction);
+
+        // "All" button
+        const allBtn = document.createElement("button");
+        allBtn.className = "region-btn active";
+        allBtn.innerHTML = `All Regions`;
+        allBtn.onclick = () => selectRegion(null);
+        btnContainer.appendChild(allBtn);
+
+        regions.forEach(r => {
+            const btn = document.createElement("button");
+            btn.className = "region-btn";
+            btn.innerHTML = `${r}<span class="var-tag">${mapData.regions[r].var_reduction}%↓</span>`;
+            btn.onclick = () => selectRegion(r);
+            btn.dataset.region = r;
+            btnContainer.appendChild(btn);
+        });
+
+        // Zoom behavior
+        const zoom = d3.zoom()
+            .scaleExtent([1, 12])
+            .on("zoom", (e) => g.attr("transform", e.transform));
+        svg.call(zoom);
+    }
+
+    function drawCells(cellsToShow) {
+        const tooltip = d3.select("#tooltip");
+
+        g.selectAll(".cell").remove();
+        g.selectAll(".cell")
+            .data(cellsToShow.filter(c => projection([c.lon, c.lat]) != null))
+            .join("circle")
+            .attr("class", "cell")
+            .attr("cx", d => projection([d.lon, d.lat])[0])
+            .attr("cy", d => projection([d.lon, d.lat])[1])
+            .attr("r", d => {
+                if (currentRegion) return Math.max(d.w * 0.08 + 2, 2.5);
+                return 2.5;
+            })
+            .attr("fill", d => SC_COLORS[d.sc])
+            .attr("opacity", d => {
+                if (currentRegion) return Math.max(d.w / 100 * 0.7 + 0.3, 0.3);
+                return 0.6;
+            })
+            .attr("stroke", d => currentRegion && d.w > 5 ? "#fff" : "none")
+            .attr("stroke-width", 0.5)
+            .on("mouseover", function(event, d) {
+                d3.select(this).attr("stroke", "#fff").attr("stroke-width", 2).raise();
+                const avgWpd = d3.mean(d.wpd);
+                tooltip.classed("visible", true)
+                    .html(`
+                        <div class="tt-title">${d.region} · SC-${d.sc}</div>
+                        <div class="tt-row"><span>Position</span><span class="tt-val">${d.lat.toFixed(2)}°N, ${d.lon.toFixed(2)}°</span></div>
+                        <div class="tt-row"><span>Mean WPD</span><span class="tt-val">${avgWpd.toFixed(0)} W/m²</span></div>
+                        <div class="tt-row"><span>Allocation</span><span class="tt-val">${d.w.toFixed(1)}%</span></div>
+                        <div class="tt-row"><span>Peak Month</span><span class="tt-val">${MONTHS[d.wpd.indexOf(Math.max(...d.wpd))]}</span></div>
+                    `)
+                    .style("left", (event.offsetX + 15) + "px")
+                    .style("top", (event.offsetY - 10) + "px");
+            })
+            .on("mouseout", function(event, d) {
+                d3.select(this)
+                    .attr("stroke", currentRegion && d.w > 5 ? "#fff" : "none")
+                    .attr("stroke-width", 0.5);
+                tooltip.classed("visible", false);
+            });
+    }
+
+    function selectRegion(region) {
+        currentRegion = region;
+
+        // Update buttons
+        document.querySelectorAll(".region-btn").forEach(b => {
+            b.classList.toggle("active",
+                (region === null && !b.dataset.region) ||
+                (b.dataset.region === region));
+        });
+
+        // Filter cells
+        const cellsToShow = region
+            ? mapData.cells.filter(c => c.region === region)
+            : mapData.cells;
+        drawCells(cellsToShow);
+
+        // Zoom to region
+        if (region && cellsToShow.length > 0) {
+            const points = cellsToShow.map(c => projection([c.lon, c.lat])).filter(p => p);
+            if (points.length > 0) {
+                const xMin = d3.min(points, p => p[0]);
+                const xMax = d3.max(points, p => p[0]);
+                const yMin = d3.min(points, p => p[1]);
+                const yMax = d3.max(points, p => p[1]);
+                const pad = 50;
+                const w = document.getElementById("mapContainer").clientWidth;
+                const h = document.getElementById("mapContainer").clientHeight;
+                const scale = Math.min(w / (xMax - xMin + pad * 2), h / (yMax - yMin + pad * 2), 8);
+                const cx = (xMin + xMax) / 2;
+                const cy = (yMin + yMax) / 2;
+                svg.transition().duration(750).call(
+                    d3.zoom().scaleExtent([1, 12]).on("zoom", e => g.attr("transform", e.transform))
+                        .transform,
+                    d3.zoomIdentity.translate(w/2, h/2).scale(scale).translate(-cx, -cy)
+                );
+            }
+        } else {
+            svg.transition().duration(750).call(
+                d3.zoom().scaleExtent([1, 12]).on("zoom", e => g.attr("transform", e.transform))
+                    .transform,
+                d3.zoomIdentity
+            );
+        }
+
+        // Update sidebar
+        updateSidebar(region);
+    }
+
+    function updateSidebar(region) {
+        const title = document.getElementById("regionTitle");
+        const subtitle = document.getElementById("regionSubtitle");
+        const statsGrid = document.getElementById("statsGrid");
+        const scLegend = document.getElementById("scLegend");
+        const chartContainer = document.getElementById("chartContainer");
+        const boemBox = document.getElementById("boemLegendBox");
+
+        if (!region) {
+            title.textContent = "All Regions";
+            subtitle.textContent = "Click a region to explore sub-cluster portfolios.";
+            statsGrid.style.display = "none";
+            scLegend.innerHTML = "";
+            chartContainer.style.display = "none";
+            boemBox.style.display = "none";
+            return;
+        }
+
+        const rdata = mapData.regions[region];
+        title.textContent = region;
+        subtitle.textContent = `${Object.values(rdata.subclusters).reduce((s,v) => s+v.n_cells, 0)} golden-zone cells · ${Object.keys(rdata.subclusters).length} sub-clusters`;
+
+        // Stats
+        statsGrid.style.display = "grid";
+        document.getElementById("statVarRed").textContent = rdata.var_reduction + "%";
+        document.getElementById("statMinCorr").textContent = (REGION_MIN_CORR[region] ?? "—").toString();
+        document.getElementById("statCells").textContent = Object.values(rdata.subclusters).reduce((s,v) => s+v.n_cells, 0);
+
+        // Subcluster legend
+        const scNames = { 
+            "Pacific": ["Pacific NW", "N. California", "S. California"],
+            "Alaska": ["Arctic Slope", "Southern Coast", "Western AK"],
+            "Mid-Atlantic": ["Nearshore", "Offshore NE", "Mid-Shelf"],
+            "New England": ["Gulf of Maine", "Offshore", "Bay of Fundy"],
+            "Southeast": ["Cape Hatteras", "SE Coast", "Carolina Shelf"],
+            "Gulf of Mexico": ["Central Gulf", "Florida Strait", "Western Gulf"],
+        };
+        const names = scNames[region] || ["SC-0","SC-1","SC-2"];
+
+        let legendHTML = '<div class="sc-legend">';
+        for (const [sc, info] of Object.entries(rdata.subclusters)) {
+            const name = names[parseInt(sc)] || `SC-${sc}`;
+            legendHTML += `
+                <div class="sc-item">
+                    <div class="sc-dot" style="background: ${SC_COLORS[parseInt(sc)]}"></div>
+                    <div class="sc-info">
+                        <div class="sc-name">${name}</div>
+                        <div class="sc-detail">${info.n_cells} cells · ${info.mean_wpd} W/m² avg</div>
+                    </div>
+                    <div class="sc-weight" style="color: ${info.weight_pct > 5 ? '#FF5722' : '#8892a4'}">${info.weight_pct.toFixed(1)}%</div>
+                </div>
+            `;
+        }
+        legendHTML += '</div>';
+        scLegend.innerHTML = legendHTML;
+
+        // Seasonal chart
+        chartContainer.style.display = "block";
+        drawSeasonalChart(region);
+
+        // BOEM legend
+        boemBox.style.display = "flex";
+    }
+
+    function drawSeasonalChart(region) {
+        const chartSvg = d3.select("#seasonalChart");
+        chartSvg.selectAll("*").remove();
+
+        const rdata = mapData.regions[region];
+        const margin = { top: 10, right: 15, bottom: 25, left: 45 };
+        const width = chartSvg.node().parentElement.clientWidth - margin.left - margin.right - 32;
+        const height = 170;
+
+        chartSvg.attr("height", height + margin.top + margin.bottom)
+                 .attr("width", width + margin.left + margin.right);
+
+        const chart = chartSvg.append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        // Get all profiles
+        const profiles = Object.entries(rdata.subclusters).map(([sc, info]) => ({
+            sc: parseInt(sc),
+            data: info.monthly_profile.map((v, i) => ({ month: i, wpd: v }))
+        }));
+
+        const allWpd = profiles.flatMap(p => p.data.map(d => d.wpd));
+        const x = d3.scaleLinear().domain([0, 11]).range([0, width]);
+        const y = d3.scaleLinear().domain([0, d3.max(allWpd) * 1.1]).range([height, 0]);
+
+        // Grid
+        chart.selectAll(".grid-line")
+            .data(y.ticks(4))
+            .join("line")
+            .attr("x1", 0).attr("x2", width)
+            .attr("y1", d => y(d)).attr("y2", d => y(d))
+            .attr("stroke", "rgba(255,255,255,0.06)");
+
+        // Lines
+        const line = d3.line().x(d => x(d.month)).y(d => y(d.wpd)).curve(d3.curveCardinal);
+
+        profiles.forEach(p => {
+            chart.append("path")
+                .datum(p.data)
+                .attr("d", line)
+                .attr("fill", "none")
+                .attr("stroke", SC_COLORS[p.sc])
+                .attr("stroke-width", 2.5)
+                .attr("opacity", 0.9);
+
+            // Dots
+            chart.selectAll(`.dot-${p.sc}`)
+                .data(p.data)
+                .join("circle")
+                .attr("cx", d => x(d.month))
+                .attr("cy", d => y(d.wpd))
+                .attr("r", 3)
+                .attr("fill", SC_COLORS[p.sc]);
+        });
+
+        // Axes
+        chart.append("g")
+            .attr("transform", `translate(0,${height})`)
+            .call(d3.axisBottom(x).ticks(12).tickFormat(i => MONTHS[i]))
+            .selectAll("text").attr("fill", "#8892a4").style("font-size", "9px");
+
+        chart.append("g")
+            .call(d3.axisLeft(y).ticks(4).tickFormat(d => d + ""))
+            .selectAll("text").attr("fill", "#8892a4").style("font-size", "9px");
+
+        chart.selectAll(".domain, .tick line").attr("stroke", "rgba(255,255,255,0.1)");
+
+        // Y-axis label
+        chart.append("text")
+            .attr("transform", "rotate(-90)")
+            .attr("y", -35).attr("x", -height/2)
+            .attr("text-anchor", "middle")
+            .attr("fill", "#8892a4")
+            .style("font-size", "9px")
+            .text("WPD (W/m²)");
+    }
+
+    init();
+    </script>
+</body>
+</html>

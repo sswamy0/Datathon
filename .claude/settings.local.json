@@ -9,7 +9,13 @@
       "Bash(git:*)",
       "Bash(ls -la ~/.claude/hooks*)",
       "Bash(python3:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(find /home/sidharth-swamy/Desktop/Datathon/data -iname *lease* -o -iname *wind*lease* -o -iname *boem* -o -iname *boundary*)",
+      "Bash(grep -r \"boundary\\\\|BOEM\\\\|lease\\\\|wind.*area\\\\|wind.*zone\" /home/sidharth-swamy/Desktop/Datathon --include=*.py --include=*.md --include=*.txt)",
+      "Bash(find /home/sidharth-swamy/Desktop/Datathon -maxdepth 2 -name README* -o -name *.md)",
+      "Bash(grep -r \"BOEM_LEASES\\\\|lease.*coords\\\\|wind.*energy.*area\" /home/sidharth-swamy/Desktop/Datathon --include=*.html --include=*.py -A 5)",
+      "Bash(curl -sL \"https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json\" -o /home/sidharth-swamy/Desktop/Datathon/data/states-10m.json)",
+      "Bash(pkill -f \"python3 -m http.server 8765\")"
     ]
   }
 }
