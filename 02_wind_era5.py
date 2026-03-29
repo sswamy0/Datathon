@@ -6,8 +6,14 @@ Usage:
   python 02_wind_era5.py month <N>       Process month N (1-12) → monthly parquet
   python 02_wind_era5.py aggregate       Combine monthly parquets → suitability
 
-Source  : data/Wind/data.grib  (local ERA5 GRIB, ~12 GB)
-Method  : eccodes message-by-message streaming (peak RAM ~1 GB, not 12 GB)
+Source  : data/Wind/oper*.nc, data/Wind/wave*.nc  (ERA5 NetCDF4)
+
+File → month mapping:
+  oper2/wave2 → Jan-Mar   (u100/v100 in oper file)
+  oper3/wave3 → Apr-May   (u100/v100 in oper file)
+  oper4/wave4 → Jun-Jul   (u100/v100 in oper file)
+  oper1/wave1 → Nov-Dec   (u100/v100 from missing_wind_vectors.nc)
+  oper5/wave5 → Aug-Oct   (u100/v100 from missing_wind_vectors.nc)
 
 Outputs (month mode):
   data/era5_month_01.parquet … data/era5_month_12.parquet
@@ -41,19 +47,13 @@ from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import MinMaxScaler
 
 try:
-    import eccodes
-except ImportError:
-    print("ERROR: eccodes not installed. Run: pip install eccodes")
-    sys.exit(1)
-
-try:
     import cmocean
     HAS_CMOCEAN = True
 except ImportError:
     HAS_CMOCEAN = False
 
 # -- Config --------------------------------------------------------------------
-GRIB_PATH  = Path("data/Wind/data.grib")
+WIND_DIR   = Path("data/Wind")
 BATHY_PQ   = Path("data/bathymetry_processed.parquet")
 ERA5_PQ    = Path("data/era5_annual_means_2025.parquet")
 RESULT_PQ  = Path("data/suitability_results_2025.parquet")
@@ -62,6 +62,27 @@ OUT_DIR    = Path("outputs/plots")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 YEAR = 2025
+
+# Map file index → months contained
+FILE_MONTHS: dict[int, list[int]] = {
+    1: [11, 12],        # Nov-Dec
+    2: [1, 2, 3],       # Jan-Mar
+    3: [4, 5],          # Apr-May  (note: ends May 30)
+    4: [6, 7],          # Jun-Jul
+    5: [8, 9, 10],      # Aug-Oct
+}
+
+# File indices that have u100/v100 in the oper file itself
+FILES_WITH_WIND = {2, 3, 4}
+
+# Supplemental wind vectors for months missing from oper files (Aug-Dec)
+WIND_SUPPLEMENT = WIND_DIR / "missing_wind_vectors.nc"
+
+# Reverse lookup: month → file index
+MONTH_TO_FILE: dict[int, int] = {}
+for fidx, months in FILE_MONTHS.items():
+    for m in months:
+        MONTH_TO_FILE[m] = fidx
 
 # Golden Zone thresholds (industry-standard for offshore wind)
 WPD_MIN_W_M2 = 200.0     # IEC Class III minimum (~6 m/s mean)
@@ -82,176 +103,77 @@ W_WAVE  = 0.2
 DBSCAN_EPS     = 0.75
 DBSCAN_MIN_PTS = 2
 
-SFC_VARS  = {"100u", "100v", "2t", "sp"}
-WAVE_VARS = {"swh", "mwp"}
-
-# GRIB fill-value sentinel threshold — anything above this is not real data
-WAVE_SENTINEL = 100.0
-
 
 def _month_parquet_path(month: int) -> Path:
     return Path(f"data/era5_month_{month:02d}.parquet")
 
 
 # ------------------------------------------------------------------------------
-# SECTION 1 — Stream GRIB message-by-message via eccodes
+# SECTION 1 — Read NetCDF files via xarray
 # ------------------------------------------------------------------------------
 
-def _grid_coords_from_msg(msgid: int) -> tuple[int, int, np.ndarray, np.ndarray]:
-    """Extract (Nj, Ni, lats, lons) from a GRIB message handle."""
-    Ni = eccodes.codes_get(msgid, "Ni")
-    Nj = eccodes.codes_get(msgid, "Nj")
-    lat0 = eccodes.codes_get(msgid, "latitudeOfFirstGridPointInDegrees")
-    lat1 = eccodes.codes_get(msgid, "latitudeOfLastGridPointInDegrees")
-    lon0 = eccodes.codes_get(msgid, "longitudeOfFirstGridPointInDegrees")
-    lon1 = eccodes.codes_get(msgid, "longitudeOfLastGridPointInDegrees")
-    lats = np.linspace(lat0, lat1, Nj)
-    lons = np.linspace(lon0, lon1, Ni)
-    return Nj, Ni, lats, lons
-
-
-def _process_month_from_grib(
-    grib_path: Path,
-    year: int,
+def _process_month_from_nc(
     month: int,
-) -> tuple[xr.Dataset, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[xr.Dataset, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     """
-    Single pass through the GRIB file, reading one message at a time.
-    Only decodes data for messages matching the target year/month.
-
-    Surface vars (100u, 100v, 2t, sp) are buffered per-timestep and
-    physics (WPD, wind speed, air density) computed immediately when
-    all 4 arrive, then the buffer is freed.
-
-    Wave vars (swh, mwp) are collected for percentile / max / mean.
+    Read ERA5 NetCDF files for the given month, compute wind physics.
 
     Returns:
         (physics_ds, lsm_grid, lsm_lats, lsm_lons)
     """
-    print(f"[1] Streaming GRIB messages for {year}-{month:02d} ...")
-    print(f"    File: {grib_path} ({grib_path.stat().st_size / 1e9:.1f} GB)")
+    fidx = MONTH_TO_FILE[month]
+    oper_path = WIND_DIR / f"oper{fidx}.nc"
+    wave_path = WIND_DIR / f"wave{fidx}.nc"
 
-    # -- Surface accumulators (initialised on first matching message) --
-    sfc_lats = sfc_lons = None
-    wpd_sum: np.ndarray | None = None
-    ws_sum: np.ndarray | None = None
-    rho_sum: np.ndarray | None = None
-    n_valid: np.ndarray | None = None
+    print(f"[1] Reading NetCDF for {YEAR}-{month:02d} ...")
+    print(f"    Oper file: {oper_path}")
+    print(f"    Wave file: {wave_path}")
 
-    # Timestep buffer: {(dataDate, dataTime): {shortName: 2d-array}}
-    sfc_buffer: dict[tuple[int, int], dict[str, np.ndarray]] = {}
+    # -- Load oper file and filter to target month --
+    oper_ds = xr.open_dataset(oper_path)
+    oper_month = oper_ds.sel(valid_time=oper_ds.valid_time.dt.month == month)
 
-    # -- Wave collectors --
-    wave_lats = wave_lons = None
-    swh_all: list[np.ndarray] = []
-    mwp_all: list[np.ndarray] = []
+    sfc_lats = oper_ds.latitude.values
+    sfc_lons = oper_ds.longitude.values
 
-    # -- Land-sea mask (grab first occurrence) --
-    lsm_grid: np.ndarray | None = None
-    lsm_lats = lsm_lons = None
+    # -- Land-sea mask (time-invariant, take first timestep) --
+    lsm_grid = None
+    lsm_lats = None
+    lsm_lons = None
+    if "lsm" in oper_ds.data_vars:
+        lsm_grid = oper_ds["lsm"].isel(valid_time=0).values
+        lsm_lats = sfc_lats
+        lsm_lons = sfc_lons
+        print(f"    Land-sea mask: {lsm_grid.shape}")
 
-    n_total = 0
-    n_decoded = 0
+    # -- Load wind vectors (from oper file or supplement) --
+    if "u100" in oper_month.data_vars:
+        u100 = oper_month["u100"].values  # (time, lat, lon)
+        v100 = oper_month["v100"].values
+    else:
+        print(f"    u100/v100 not in oper file, reading from {WIND_SUPPLEMENT.name} ...")
+        wind_ds_sup = xr.open_dataset(WIND_SUPPLEMENT)
+        wind_month = wind_ds_sup.sel(valid_time=wind_ds_sup.valid_time.dt.month == month)
+        u100 = wind_month["u100"].values
+        v100 = wind_month["v100"].values
+        wind_ds_sup.close()
+        del wind_month
 
-    with open(grib_path, "rb") as f:
-        while True:
-            msgid = eccodes.codes_grib_new_from_file(f)
-            if msgid is None:
-                break
-            n_total += 1
+    # -- Compute wind physics --
+    t2m  = oper_month["t2m"].values
+    sp   = oper_month["sp"].values
 
-            try:
-                sn = eccodes.codes_get(msgid, "shortName")
+    n_timesteps = u100.shape[0]
+    print(f"    Timesteps for month {month}: {n_timesteps}")
 
-                # --- Land-sea mask (time-invariant, grab once) ---
-                if sn == "lsm" and lsm_grid is None:
-                    Nj, Ni, lsm_lats, lsm_lons = _grid_coords_from_msg(msgid)
-                    lsm_grid = eccodes.codes_get_values(msgid).reshape(Nj, Ni)
-                    continue
+    ws  = np.sqrt(u100 ** 2 + v100 ** 2)
+    rho = sp / (R_DRY_AIR * t2m)
+    wpd = 0.5 * rho * ws ** 3
 
-                # Skip vars we don't need
-                if sn not in SFC_VARS and sn not in WAVE_VARS:
-                    continue
-
-                # Filter by date
-                dd = eccodes.codes_get(msgid, "dataDate")   # YYYYMMDD
-                msg_year  = dd // 10000
-                msg_month = (dd % 10000) // 100
-                if msg_year != year or msg_month != month:
-                    continue
-
-                dt = eccodes.codes_get(msgid, "dataTime")    # HHMM
-                Nj, Ni, msg_lats, msg_lons = _grid_coords_from_msg(msgid)
-                grid = eccodes.codes_get_values(msgid).reshape(Nj, Ni)
-                n_decoded += 1
-
-                # --- Surface variables ---
-                if sn in SFC_VARS:
-                    if sfc_lats is None:
-                        sfc_lats, sfc_lons = msg_lats, msg_lons
-                        wpd_sum  = np.zeros((Nj, Ni), dtype=np.float64)
-                        ws_sum   = np.zeros((Nj, Ni), dtype=np.float64)
-                        rho_sum  = np.zeros((Nj, Ni), dtype=np.float64)
-                        n_valid  = np.zeros((Nj, Ni), dtype=np.int32)
-
-                    key = (dd, dt)
-                    sfc_buffer.setdefault(key, {})[sn] = grid
-
-                    # All 4 surface vars arrived for this timestep → compute physics
-                    if len(sfc_buffer[key]) == 4:
-                        u  = sfc_buffer[key]["100u"]
-                        v  = sfc_buffer[key]["100v"]
-                        t  = sfc_buffer[key]["2t"]
-                        sp = sfc_buffer[key]["sp"]
-
-                        ws  = np.sqrt(u ** 2 + v ** 2)
-                        rho = sp / (R_DRY_AIR * t)
-                        wpd = 0.5 * rho * ws ** 3
-
-                        mask = ~np.isnan(wpd)
-                        wpd_sum += np.where(mask, wpd, 0.0)
-                        ws_sum  += np.where(mask, ws,  0.0)
-                        rho_sum += np.where(mask, rho, 0.0)
-                        n_valid += mask.astype(np.int32)
-
-                        del sfc_buffer[key]
-
-                # --- Wave variables ---
-                elif sn in WAVE_VARS:
-                    if wave_lats is None:
-                        wave_lats, wave_lons = msg_lats, msg_lons
-
-                    if sn == "swh":
-                        swh_all.append(grid.astype(np.float32))
-                    elif sn == "mwp":
-                        mwp_all.append(grid.astype(np.float32))
-
-            finally:
-                eccodes.codes_release(msgid)
-
-            # Progress every 50 000 messages (~10%)
-            if n_total % 50_000 == 0:
-                print(f"    ... scanned {n_total:,} messages, "
-                      f"decoded {n_decoded:,} for {year}-{month:02d}",
-                      flush=True)
-
-    print(f"    Scan complete: {n_total:,} total messages, "
-          f"{n_decoded:,} decoded for {year}-{month:02d}")
-
-    # -- Build surface physics dataset --
-    if wpd_sum is None or n_valid is None:
-        print("    ERROR: No surface data found for this month!")
-        sys.exit(1)
-
-    safe_n = np.where(n_valid > 0, n_valid, 1)
-    no_data = n_valid == 0
-
-    wpd_mean = (wpd_sum / safe_n).astype(np.float32)
-    ws_mean  = (ws_sum  / safe_n).astype(np.float32)
-    rho_mean = (rho_sum / safe_n).astype(np.float32)
-    wpd_mean[no_data] = np.nan
-    ws_mean[no_data]  = np.nan
-    rho_mean[no_data] = np.nan
+    # Mean over time axis
+    wpd_mean = np.nanmean(wpd, axis=0).astype(np.float32)
+    ws_mean  = np.nanmean(ws,  axis=0).astype(np.float32)
+    rho_mean = np.nanmean(rho, axis=0).astype(np.float32)
 
     wind_ds = xr.Dataset(
         {
@@ -262,48 +184,54 @@ def _process_month_from_grib(
         coords={"lat": sfc_lats, "lon": sfc_lons},
     )
 
-    del wpd_sum, ws_sum, rho_sum, n_valid, safe_n, no_data
+    del u100, v100, t2m, sp, ws, rho, wpd, wpd_mean, ws_mean, rho_mean
+    oper_ds.close()
+    del oper_month
     gc.collect()
     print("    Wind physics done.", flush=True)
 
-    # -- Build wave dataset --
-    if swh_all:
-        swh_stack = np.stack(swh_all, axis=0)
-        del swh_all
-        mwp_stack = np.stack(mwp_all, axis=0) if mwp_all else None
-        del mwp_all
-        gc.collect()
+    # -- Wave data --
+    if wave_path.exists():
+        wave_ds_raw = xr.open_dataset(wave_path)
+        wave_month = wave_ds_raw.sel(
+            valid_time=wave_ds_raw.valid_time.dt.month == month,
+        )
 
-        # Clean GRIB sentinel/fill values (9999 etc.) → NaN
-        swh_stack[swh_stack >= WAVE_SENTINEL] = np.nan
-        if mwp_stack is not None:
-            mwp_stack[mwp_stack >= WAVE_SENTINEL] = np.nan
+        wave_lats = wave_ds_raw.latitude.values
+        wave_lons = wave_ds_raw.longitude.values
+
+        swh = wave_month["swh"].values  # (time, lat, lon)
+        mwp = wave_month["mwp"].values if "mwp" in wave_month else None
 
         wave_ds = xr.Dataset(
             {
-                "swh_p90":  (["lat", "lon"], np.nanquantile(swh_stack, 0.90, axis=0).astype(np.float32)),
-                "swh_max":  (["lat", "lon"], np.nanmax(swh_stack, axis=0).astype(np.float32)),
-                "mwp_mean": (["lat", "lon"], np.nanmean(mwp_stack, axis=0).astype(np.float32) if mwp_stack is not None else np.full(swh_stack.shape[1:], np.nan, dtype=np.float32)),
+                "swh_p90":  (["lat", "lon"], np.nanquantile(swh, 0.90, axis=0).astype(np.float32)),
+                "swh_max":  (["lat", "lon"], np.nanmax(swh, axis=0).astype(np.float32)),
+                "mwp_mean": (["lat", "lon"],
+                             np.nanmean(mwp, axis=0).astype(np.float32)
+                             if mwp is not None
+                             else np.full(swh.shape[1:], np.nan, dtype=np.float32)),
             },
             coords={"lat": wave_lats, "lon": wave_lons},
         )
-        del swh_stack, mwp_stack
+        del swh, mwp
+        wave_ds_raw.close()
+        del wave_month
         gc.collect()
 
-        # Interpolate wave 0.5-deg → 0.25-deg to match surface grid
-        wave_ds = wave_ds.interp(
-            lat=sfc_lats, lon=sfc_lons, method="linear",
-        )
+        # Interpolate wave 0.5° → 0.25° to match surface grid
+        wave_ds = wave_ds.interp(lat=sfc_lats, lon=sfc_lons, method="linear")
         print("    Wave stats done.", flush=True)
 
         physics_ds = xr.merge([wind_ds, wave_ds])
         del wind_ds, wave_ds
     else:
-        print("    WARNING: No wave data found — filling NaN.")
+        print("    WARNING: No wave file found — filling NaN.")
         physics_ds = wind_ds
-        physics_ds["swh_p90"]  = xr.DataArray(np.full_like(wpd_mean, np.nan), dims=["lat", "lon"])
-        physics_ds["swh_max"]  = xr.DataArray(np.full_like(wpd_mean, np.nan), dims=["lat", "lon"])
-        physics_ds["mwp_mean"] = xr.DataArray(np.full_like(wpd_mean, np.nan), dims=["lat", "lon"])
+        shape = (len(sfc_lats), len(sfc_lons))
+        physics_ds["swh_p90"]  = xr.DataArray(np.full(shape, np.nan, dtype=np.float32), dims=["lat", "lon"])
+        physics_ds["swh_max"]  = xr.DataArray(np.full(shape, np.nan, dtype=np.float32), dims=["lat", "lon"])
+        physics_ds["mwp_mean"] = xr.DataArray(np.full(shape, np.nan, dtype=np.float32), dims=["lat", "lon"])
 
     gc.collect()
     return physics_ds, lsm_grid, lsm_lats, lsm_lons
@@ -349,7 +277,7 @@ def compute_distance_to_shore(
 
 
 # ------------------------------------------------------------------------------
-# SECTION 3 — "month" mode: stream GRIB → parquet
+# SECTION 3 — "month" mode: read NetCDF → parquet
 # ------------------------------------------------------------------------------
 
 def run_single_month(month: int) -> None:
@@ -357,10 +285,8 @@ def run_single_month(month: int) -> None:
     print(f"  Processing month {month} of {YEAR}")
     print(f"{'='*60}\n")
 
-    # 1. Stream GRIB
-    physics_ds, lsm_grid, lsm_lats, lsm_lons = _process_month_from_grib(
-        GRIB_PATH, YEAR, month,
-    )
+    # 1. Read NetCDF
+    physics_ds, lsm_grid, lsm_lats, lsm_lons = _process_month_from_nc(month)
 
     # 2. Distance to shore
     print(f"\n[2] Distance to shore ...")
@@ -375,9 +301,15 @@ def run_single_month(month: int) -> None:
         print("    WARNING: No land-sea mask found — filling distance with NaN.")
         dist_km = np.full((len(sfc_lats), len(sfc_lons)), np.nan, dtype=np.float32)
 
-    # 3. Flatten to DataFrame and save
+    # 3. Apply land-sea mask and flatten to DataFrame
     print(f"\n[3] Exporting parquet ...")
     lat2d, lon2d = np.meshgrid(sfc_lats, sfc_lons, indexing="ij")
+
+    # Build ocean mask from land-sea mask (lsm <= 0.5 = ocean)
+    if lsm_grid is not None:
+        ocean_mask = (lsm_grid <= 0.5).ravel()
+    else:
+        ocean_mask = np.ones(lat2d.size, dtype=bool)
 
     df = pd.DataFrame({
         "lat":              lat2d.ravel(),
@@ -389,7 +321,11 @@ def run_single_month(month: int) -> None:
         "swh_max":          physics_ds["swh_max"].values.ravel(),
         "mwp_mean":         physics_ds["mwp_mean"].values.ravel(),
         "dist_to_shore_km": dist_km.ravel(),
-    }).dropna(subset=["wpd_mean"])
+    })
+
+    n_before = len(df)
+    df = df[ocean_mask].dropna(subset=["wpd_mean"])
+    print(f"    Filtered {n_before - len(df):,} land cells (lsm > 0.5)")
 
     df["lat"] = df["lat"].round(4)
     df["lon"] = df["lon"].round(4)
@@ -441,11 +377,6 @@ def run_aggregate() -> None:
               f"WPD {df['wpd_mean'].min():.0f}-{df['wpd_mean'].max():.0f} W/m2")
 
     all_months = pd.concat(frames, ignore_index=True)
-
-    # Clean any residual sentinel values (9999) from older monthly parquets
-    for col in ["swh_p90", "swh_max", "mwp_mean"]:
-        if col in all_months.columns:
-            all_months.loc[all_months[col] >= WAVE_SENTINEL, col] = np.nan
 
     annual = all_months.groupby(["lat", "lon"], as_index=False).agg(
         wpd_mean_annual  = ("wpd_mean",  "mean"),
@@ -774,8 +705,9 @@ def main() -> None:
         print(f"  python {sys.argv[0]} month <1-12>    Process a single month")
         print(f"  python {sys.argv[0]} aggregate        Combine monthly parquets -> suitability")
         print()
+        print()
         print("Example workflow:")
-        print("  for m in 1 2 3 4 5 6 7 8 9 10 11 12; do")
+        print(f"  for m in 1 2 3 4 5 6 7 8 9 10 11 12; do")
         print(f"    python {sys.argv[0]} month $m")
         print("  done")
         print(f"  python {sys.argv[0]} aggregate")
